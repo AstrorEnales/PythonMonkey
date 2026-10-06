@@ -8,6 +8,7 @@
 import subprocess
 import os
 import sys
+import shutil
 import platform
 from typing import Optional
 
@@ -19,6 +20,8 @@ CPUS = os.getenv('CPUS') or os.cpu_count() or 1
 
 BUILD_TYPE = os.environ["BUILD_TYPE"].title() if "BUILD_TYPE" in os.environ else "Release"
 BUILD_DOCS = "ON" if "BUILD_DOCS" in os.environ and os.environ["BUILD_DOCS"] in ("1", "ON", "on") else "OFF"
+# Bundle the JS dependencies into the wheel, so it needs neither pminit nor npm when installed
+BUNDLE_NODE_MODULES = os.environ.get("PM_BUNDLE_NODE_MODULES") in ("1", "ON", "on")
 
 
 def execute(cmd: str, cwd: Optional[str] = None):
@@ -65,12 +68,23 @@ def copy_artifacts():
     execute("cp ./_spidermonkey_install/lib/libmozjs* ./python/pythonmonkey/", cwd=TOP_DIR)
 
 
+def bundle_node_modules():
+  # what pminit installs at install time, from its lock file
+  pminit_package = os.path.join(TOP_DIR, "python", "pminit", "pythonmonkey")
+  execute("npm ci --omit=dev --no-audit --no-fund", cwd=pminit_package)
+  target = os.path.join(TOP_DIR, "python", "pythonmonkey", "node_modules")
+  shutil.rmtree(target, ignore_errors=True)
+  shutil.copytree(os.path.join(pminit_package, "node_modules"), target)
+
+
 def build():
   if BUILD_TYPE != "None":  # do not build SpiderMonkey if we are not compiling
     ensure_spidermonkey()
   run_cmake_build()
   if BUILD_TYPE != "None":  # do not copy artifacts if we did not build them
     copy_artifacts()
+  if BUNDLE_NODE_MODULES:
+    bundle_node_modules()
 
 
 if __name__ == "__main__":

@@ -31,6 +31,9 @@ include = [
 
   # Add marker file for pep561
   { path = "python/pythonmonkey/py.typed", format = ["sdist", "wheel"] },
+
+  # JS dependencies, present when built with PM_BUNDLE_NODE_MODULES=1 (see build.py)
+  { path = "python/pythonmonkey/node_modules/**/*", format = "wheel" },
 ]
 
 
@@ -49,8 +52,8 @@ bump = true
 
 [tool.poetry-dynamic-versioning.substitution]
 # Set the project version number in CMakeLists.txt
-files = [ "CMakeLists.txt" ]
-patterns = [ '(set\(PYTHONMONKEY_VERSION ")0("\))' ]
+files = [ "CMakeLists.txt", "python/pythonmonkey/_version.py" ]
+patterns = [ '(set\(PYTHONMONKEY_VERSION ")0("\))', '(__version__ = ")0(")' ]
 
 
 [tool.poetry.build]

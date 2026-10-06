@@ -5,7 +5,10 @@ from .require import *
 
 # Expose the package version
 import importlib.metadata
-__version__ = importlib.metadata.version(__name__)
+try:
+  __version__ = importlib.metadata.version(__name__)
+except importlib.metadata.PackageNotFoundError:  # vendored under another name
+  from ._version import __version__
 del importlib
 
 # Load the module by default to expose global APIs

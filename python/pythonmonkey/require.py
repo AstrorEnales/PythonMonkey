@@ -51,14 +51,19 @@ import functools
 
 from . import pythonmonkey as pm
 
-node_modules = os.path.abspath(
-  os.path.join(
-    importlib.util.find_spec("pminit").submodule_search_locations[0],  # type: ignore
-    "..",
-    "pythonmonkey",
-    "node_modules"
+# The JS dependencies: next to this package when bundled into the wheel
+# (build.py with PM_BUNDLE_NODE_MODULES=1) or installed there by pminit,
+# otherwise in pminit's own pythonmonkey directory (development layouts).
+node_modules = os.path.join(os.path.dirname(__file__), "node_modules")
+if not os.path.isdir(node_modules):
+  node_modules = os.path.abspath(
+    os.path.join(
+      importlib.util.find_spec("pminit").submodule_search_locations[0],  # type: ignore
+      "..",
+      "pythonmonkey",
+      "node_modules"
+    )
   )
-)
 evalOpts = {'filename': __file__, 'fromPythonFrame': True}  # type: pm.EvalOptions
 
 # Force to use UTF-8 encoding

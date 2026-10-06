@@ -4,9 +4,9 @@
 # @date     August 2023
 # @copyright Copyright (c) 2023 Distributive Corp.
 
+from __future__ import annotations  # aiohttp appears in annotations but is imported on first use
+
 import asyncio
-import aiohttp
-import yarl
 import io
 import platform
 import pythonmonkey as pm
@@ -48,6 +48,9 @@ async def request(
     debug: Callable[[str], Callable[..., None]],
     /
 ):
+  # Imported here so that loading pythonmonkey does not require aiohttp.
+  import aiohttp
+  import yarl
 
   # to support HTTP-Keep-Alive
   global keepAliveConnector
