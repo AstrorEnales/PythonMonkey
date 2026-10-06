@@ -17,8 +17,14 @@ if [[ "$OSTYPE" == "linux-gnu"* ]]; then # Linux
     wget curl python3-dev
 elif [[ "$OSTYPE" == "darwin"* ]]; then # macOS
   brew update || true # allow failure
-  brew install cmake pkg-config wget unzip coreutils # `coreutils` installs the `realpath` command
-  brew install lld
+  # bigheap fork: Homebrew no longer has bottles for Intel macOS (Tier 3) or older macOS versions, and building
+  # coreutils / lld from source fails or takes very long, so only install what is missing. macOS 13+ ships
+  # `realpath` and `unzip`, the runner images have cmake, pkg-config and wget, and the workflow provides `ld64.lld`.
+  for tool in cmake pkg-config wget unzip; do
+    command -v $tool >/dev/null || brew install $tool
+  done
+  command -v realpath >/dev/null || brew install coreutils # `coreutils` installs the `realpath` command
+  command -v ld64.lld >/dev/null || brew install lld # the host linker must be lld (`--enable-linker=ld64` is only for the target)
 elif [[ "$OSTYPE" == "msys"* ]]; then # Windows
   echo "Dependencies are not going to be installed automatically on Windows."
 else
