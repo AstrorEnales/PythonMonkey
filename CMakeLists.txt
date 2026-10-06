@@ -41,7 +41,7 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
   else()
     SET(COMPILE_FLAGS "-fno-rtti -Wno-invalid-offsetof")
 
-    SET(OPTIMIZED "-Ofast -DNDEBUG")
+    SET(OPTIMIZED "-O2 -DNDEBUG") # not -Ofast: its fast-math assumes no NaN or infinity, which JS numbers carry
     SET(UNOPTIMIZED "-O0")
     SET(KEEP_SYMBOLS "-ggdb")
     SET(STRIP_SYMBOLS "-s")
