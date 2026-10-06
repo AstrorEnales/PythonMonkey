@@ -350,6 +350,28 @@ jobs:
         if: ${{ !cancelled() && steps.install.outcome == 'success' }} # also after failed Python tests; needs pmjs from the wheel
         run: |
           poetry run bash ./peter-jr ./tests/js/
+      - name: Run Python tests on the first patch release of this Python
+        # The wheel is built against the newest patch release, but the bridge reads private CPython
+        # internals that have moved within a minor version (PyThreadState in 3.13.13 and 3.14.4,
+        # see src/PyEventLoop.cc). uv provides the old interpreter (its oldest 3.11 is 3.11.1).
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        timeout-minutes: 15 # a misread event loop hangs the interpreter at exit
+        run: |
+          first_patch="$PYTHON_VERSION.0"
+          if [ "$PYTHON_VERSION" = "3.11" ]; then first_patch=3.11.1; fi
+          python -m pip install uv
+          python -m uv venv --python "$first_patch" ./first-patch-venv
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            venv_python=./first-patch-venv/Scripts/python.exe
+          else
+            venv_python=./first-patch-venv/bin/python
+          fi
+          python -m uv pip install --python "$venv_python" --no-deps ./dist/*.whl
+          python -m uv pip install --python "$venv_python" "pytest<8" numpy aiohttp
+          "$venv_python" --version
+          "$venv_python" -m pytest tests/python
+        env:
+          PYTHON_VERSION: ${{ matrix.python_version }}
   release:
     if: ${{ startsWith(github.ref, 'refs/tags/bigheap-v') }}
     needs: [build-wheels]

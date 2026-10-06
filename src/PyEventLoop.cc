@@ -165,8 +165,19 @@ PyEventLoop PyEventLoop::_getLoopOnThread(PyThreadState *tstate) {
       PyObject *asyncio_running_loop; // we only need the first few fields of `_PyThreadStateImpl`
     };
 
+    // CPython 3.13.13 and 3.14.4 appended `datastack_cached_chunk` to PyThreadState, which moves
+    // `asyncio_running_loop` by one pointer. Place it by the running interpreter's version
+    // (Py_Version), so a wheel built on one side of those releases works on the other.
+    #if PY_VERSION_HEX >= 0x030e0000
+    const unsigned long datastackChunkAdded = 0x030e0400;
+    #else
+    const unsigned long datastackChunkAdded = 0x030d0d00;
+    #endif
+    const int datastackChunkShift = int(Py_Version >= datastackChunkAdded) - int(PY_VERSION_HEX >= datastackChunkAdded);
+    PyThreadStateHolder *holder = (PyThreadStateHolder *)((char *)tstate + datastackChunkShift * (int)sizeof(void *));
+
     // Modified from https://github.com/python/cpython/blob/v3.13.0rc1/Modules/_asynciomodule.c#L3205-L3210
-    PyObject *loop = ((PyThreadStateHolder *)tstate)->asyncio_running_loop;
+    PyObject *loop = holder->asyncio_running_loop;
     if (loop == NULL) {
       return _loopNotFound();
     }

@@ -56,9 +56,13 @@ from . import pythonmonkey as pm
 # otherwise in pminit's own pythonmonkey directory (development layouts).
 node_modules = os.path.join(os.path.dirname(__file__), "node_modules")
 if not os.path.isdir(node_modules):
+  pminit_spec = importlib.util.find_spec("pminit")
+  if pminit_spec is None:
+    raise ImportError(f"pythonmonkey's JS dependencies are missing: {node_modules} does not exist and pminit "
+                      "is not installed (build with PM_BUNDLE_NODE_MODULES=1 to bundle them)")
   node_modules = os.path.abspath(
     os.path.join(
-      importlib.util.find_spec("pminit").submodule_search_locations[0],  # type: ignore
+      pminit_spec.submodule_search_locations[0],  # type: ignore
       "..",
       "pythonmonkey",
       "node_modules"
