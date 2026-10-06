@@ -69,6 +69,7 @@ sed -i'' -e '/MOZ_CRASH_UNSAFE_PRINTF/,/__PRETTY_FUNCTION__);/d' ./mfbt/LinkedLi
 sed -i'' -e '/MOZ_ASSERT(stackRootPtr == nullptr);/d' ./js/src/vm/JSContext.cpp # would assert false in Debug Build since we extensively use `new JS::Rooted`
 sed -i'' -e 's/"-fuse-ld=ld"/"-ld64" if c_compiler.version > "14.0.0" else "-fuse-ld=ld"/' ./build/moz.configure/toolchain.configure # XCode 15 changed the linker behaviour. See https://developer.apple.com/documentation/xcode-release-notes/xcode-15-release-notes#Linking
 sed -i'' -e 's/defined(XP_WIN)/defined(_WIN32)/' ./mozglue/baseprofiler/public/BaseProfilerUtils.h # this header file is introduced to js/Debug.h in https://phabricator.services.mozilla.com/D221102, but it would be compiled without XP_WIN in this building configuration
+patch -p1 --forward < ../patches/spidermonkey-gc-max-bytes.patch # JSGC_MAX_BYTES is a uint32_t, capping the GC heap at 4 GiB; let UINT32_MAX mean "no limit" (or JS_GC_MAX_MB)
 
 cd js/src
 mkdir -p _build

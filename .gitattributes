@@ -1,0 +1,3 @@
+# Patches applied to the SpiderMonkey source by setup.sh must keep LF endings,
+# even when a Windows checkout converts other files to CRLF.
+*.patch text eol=lf

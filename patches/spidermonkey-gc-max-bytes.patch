@@ -1,0 +1,56 @@
+diff -ru a/js/src/gc/Scheduling.cpp b/js/src/gc/Scheduling.cpp
+--- a/js/src/gc/Scheduling.cpp	2026-10-06 09:27:10.185727900 +0200
++++ b/js/src/gc/Scheduling.cpp	2026-10-06 09:27:23.120387500 +0200
+@@ -12,6 +12,8 @@
+ 
+ #include <algorithm>
+ #include <cmath>
++#include <stdint.h>
++#include <stdlib.h>
+ 
+ #include "gc/Memory.h"
+ #include "gc/Nursery.h"
+@@ -128,6 +130,31 @@
+   }
+ };
+ 
++// JSGC_MAX_BYTES: like ConvertSize, except that UINT32_MAX (the largest value
++// the uint32_t parameter API can express, and what embedders pass to mean "as
++// large as possible") lifts the 4 GiB ceiling so 64-bit hosts can grow the GC
++// heap further. The limit is then JS_GC_MAX_MB megabytes when that environment
++// variable holds a positive integer, and unlimited otherwise.
++struct ConvertMaxBytes {
++  static uint32_t toUint32(size_t value) {
++    return value > UINT32_MAX ? UINT32_MAX : uint32_t(value);
++  }
++  static Maybe<size_t> fromUint32(uint32_t param) {
++    if (param != UINT32_MAX) {
++      return Some(size_t(param));
++    }
++    if (const char* env = getenv("JS_GC_MAX_MB")) {
++      char* end = nullptr;
++      unsigned long long mb = strtoull(env, &end, 10);
++      if (end != env && *end == '\0' && mb > 0 &&
++          mb <= SIZE_MAX / (1024 * 1024)) {
++        return Some(size_t(mb) * 1024 * 1024);
++      }
++    }
++    return Some(SIZE_MAX);
++  }
++};
++
+ }  // anonymous namespace
+ 
+ // Helper functions to check GC parameter values
+diff -ru a/js/src/gc/Scheduling.h b/js/src/gc/Scheduling.h
+--- a/js/src/gc/Scheduling.h	2026-10-06 09:27:10.174944100 +0200
++++ b/js/src/gc/Scheduling.h	2026-10-06 09:27:23.197706500 +0200
+@@ -341,7 +341,7 @@
+    *                                                                           \
+    * Maximum nominal heap before last ditch GC.                                \
+    */                                                                          \
+-  _(JSGC_MAX_BYTES, size_t, gcMaxBytes, ConvertSize, NoCheck, 0xffffffff)      \
++  _(JSGC_MAX_BYTES, size_t, gcMaxBytes, ConvertMaxBytes, NoCheck, 0xffffffff)  \
+                                                                                \
+   /*                                                                           \
+    * JSGC_MIN_NURSERY_BYTES                                                    \
