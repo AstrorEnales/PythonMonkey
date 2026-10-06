@@ -38,7 +38,9 @@
 #include <datetime.h>
 #include "include/pyshim.hh"
 
+#include <mutex>
 #include <unordered_map>
+#include <vector>
 
 #define HIGH_SURROGATE_START 0xD800
 #define LOW_SURROGATE_START 0xDC00
@@ -50,22 +52,52 @@ static PyObjectProxyHandler pyObjectProxyHandler;
 static PyListProxyHandler pyListProxyHandler;
 static PyIterableProxyHandler pyIterableProxyHandler;
 
-std::unordered_map<PyObject *, size_t> externalStringObjToRefCountMap; // a map of python string objects to the number of JSExternalStrings that depend on it, used when finalizing JSExternalStrings
+// Python strings whose buffers back JSExternalStrings, keyed by that buffer
+// (PyUnicode_DATA; PyUnicode_<2/1>BYTE_DATA are just casts of it), since the
+// callbacks below receive only the buffer. Each entry holds one Python reference
+// per JSExternalString using it. SpiderMonkey may finalize external strings on
+// its background sweeping thread, without the GIL, so the table is locked, and
+// references released by finalize() are dropped by the next retainExternalString()
+// call, which runs with the GIL held.
+struct ExternalStringEntry {
+  PyObject *string;
+  size_t count;
+};
+static std::mutex externalStringsMutex;
+static std::unordered_map<const void *, ExternalStringEntry> externalStrings;
+static std::vector<PyObject *> releasedExternalStrings;
+
+static void retainExternalString(PyObject *string)
+{
+  std::vector<PyObject *> released;
+  {
+    std::lock_guard<std::mutex> lock(externalStringsMutex);
+    released.swap(releasedExternalStrings);
+    ExternalStringEntry &entry = externalStrings[PyUnicode_DATA(string)];
+    entry.string = string;
+    entry.count++;
+  }
+  Py_INCREF(string);
+  for (PyObject *releasedString : released) {
+    Py_DECREF(releasedString);
+  }
+}
+
+static PyObject *lookupExternalString(const void *chars)
+{
+  std::lock_guard<std::mutex> lock(externalStringsMutex);
+  auto it = externalStrings.find(chars);
+  return it == externalStrings.end() ? NULL : it->second.string; // NULL shouldn't be reachable
+}
 
 PyObject *PythonExternalString::getPyString(const char16_t *chars)
 {
-  for (auto it: externalStringObjToRefCountMap) {
-    if (PyUnicode_DATA(it.first) == (void *)chars) { // PyUnicode_<2/1>BYTE_DATA are just type casts of PyUnicode_DATA
-      return it.first;
-    }
-  }
-
-  return NULL; // this shouldn't be reachable
+  return lookupExternalString(chars);
 }
 
 PyObject *PythonExternalString::getPyString(const JS::Latin1Char *chars)
 {
-  return PythonExternalString::getPyString((const char16_t *)chars);
+  return lookupExternalString(chars);
 }
 
 void PythonExternalString::finalize(char16_t *chars) const
@@ -75,16 +107,12 @@ void PythonExternalString::finalize(char16_t *chars) const
   // to free the object since the entire process memory is being released.
   if (Py_IsFinalizing()) { return; }
 
-  for (auto it = externalStringObjToRefCountMap.cbegin(), next_it = it; it != externalStringObjToRefCountMap.cend(); it = next_it) {
-    next_it++;
-    if (PyUnicode_DATA(it->first) == (void *)chars) {
-      Py_DECREF(it->first);
-      externalStringObjToRefCountMap[it->first] = externalStringObjToRefCountMap[it->first] - 1;
-
-      if (externalStringObjToRefCountMap[it->first] == 0) {
-        externalStringObjToRefCountMap.erase(it);
-      }
-    }
+  std::lock_guard<std::mutex> lock(externalStringsMutex);
+  auto it = externalStrings.find(chars);
+  if (it == externalStrings.end()) { return; }
+  releasedExternalStrings.push_back(it->second.string);
+  if (--it->second.count == 0) {
+    externalStrings.erase(it);
   }
 }
 
@@ -95,13 +123,8 @@ void PythonExternalString::finalize(JS::Latin1Char *chars) const
 
 size_t PythonExternalString::sizeOfBuffer(const char16_t *chars, mozilla::MallocSizeOf mallocSizeOf) const
 {
-  for (auto it: externalStringObjToRefCountMap) {
-    if (PyUnicode_DATA(it.first) == (void *)chars) {
-      return PyUnicode_GetLength(it.first);
-    }
-  }
-
-  return 0; // // this shouldn't be reachable
+  PyObject *string = lookupExternalString(chars);
+  return string ? PyUnicode_GetLength(string) : 0; // 0 shouldn't be reachable
 }
 
 size_t PythonExternalString::sizeOfBuffer(const JS::Latin1Char *chars, mozilla::MallocSizeOf mallocSizeOf) const
@@ -169,15 +192,13 @@ JS::Value jsTypeFactory(JSContext *cx, PyObject *object) {
         break;
       }
     case (PyUnicode_2BYTE_KIND): {
-        externalStringObjToRefCountMap[object] = externalStringObjToRefCountMap[object] + 1;
-        Py_INCREF(object);
+        retainExternalString(object);
         JSString *str = JS_NewExternalUCString(cx, (char16_t *)PyUnicode_2BYTE_DATA(object), PyUnicode_GET_LENGTH(object), &PythonExternalStringCallbacks);
         returnType.setString(str);
         break;
       }
     case (PyUnicode_1BYTE_KIND): {
-        externalStringObjToRefCountMap[object] = externalStringObjToRefCountMap[object] + 1;
-        Py_INCREF(object);
+        retainExternalString(object);
         JSString *str = JS_NewExternalStringLatin1(cx, (JS::Latin1Char *)PyUnicode_1BYTE_DATA(object), PyUnicode_GET_LENGTH(object), &PythonExternalStringCallbacks);
         // JSExternalString can now be properly treated as either one-byte or two-byte strings when GCed
         // see https://hg.mozilla.org/releases/mozilla-esr128/file/tip/js/src/vm/StringType-inl.h#l785
