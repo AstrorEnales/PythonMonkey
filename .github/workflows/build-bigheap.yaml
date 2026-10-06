@@ -304,25 +304,32 @@ jobs:
             echo "$wheel -> $tagged (binaries need macOS $minos)"
             if [ "$wheel" != "$tagged" ]; then mv "$wheel" "$tagged"; fi
           done
-      - name: Check the Linux wheel tag
+      - name: Tag Linux wheels manylinux_2_31
         if: ${{ startsWith(matrix.os, 'ubuntu') }}
+        # Poetry tags the first platform packaging.tags reports for the build interpreter, which
+        # can be plain linux_<arch> (not accepted by PyPI or pip's manylinux selection). The
+        # container's glibc decides the tag; `wheel tags` also rewrites the tag in WHEEL.
         run: |
+          glibc=$(getconf GNU_LIBC_VERSION)
+          if [ "$glibc" != "glibc 2.31" ]; then echo "Expected glibc 2.31 in the build container, found $glibc"; exit 1; fi
+          poetry run python -m pip install wheel
           for wheel in ./dist/*.whl; do
-            case "$wheel" in
-              *manylinux_2_31_*) echo "$wheel" ;;
-              *) echo "Expected a manylinux_2_31 wheel: $wheel"; exit 1 ;;
-            esac
+            poetry run python -m wheel tags --remove --platform-tag "manylinux_2_31_$(uname -m)" "$wheel"
           done
+          ls -lah ./dist/
       - name: Upload wheel as CI artifacts
         uses: actions/upload-artifact@v4
         with:
           name: wheel-${{ runner.os }}-${{ runner.arch }}-Python${{ matrix.python_version }}
           path: ./dist/*.whl
           if-no-files-found: error
-      - name: Run Python tests (pytest)
+      - name: Install the wheel for the tests
+        id: install
         run: |
           poetry run python -m pip install --force-reinstall --no-deps ./dist/*.whl
           poetry run python -m pip install aiohttp # used by the XMLHttpRequest tests; importing pythonmonkey no longer needs it
+      - name: Run Python tests (pytest)
+        run: |
           poetry run python -m pytest tests/python
       - name: Check the wheel works alone and vendored
         if: ${{ !cancelled() && steps.build.outcome == 'success' }} # also after failed pytest
@@ -337,7 +344,7 @@ jobs:
           "$venv_python" .github/scripts/check_self_contained.py plain
           "$venv_python" .github/scripts/check_self_contained.py vendor
       - name: Run JS tests (peter-jr)
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }} # also after failed Python tests
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }} # also after failed Python tests; needs pmjs from the wheel
         run: |
           poetry run bash ./peter-jr ./tests/js/
   release:
