@@ -238,6 +238,16 @@ jobs:
         with:
           node-version: 20
       - name: Setup Poetry
+        id: poetry
+        uses: snok/install-poetry@v1.4.1
+        continue-on-error: true # its installer does not retry network errors (seen in the arm64 container)
+        with:
+          version: 1.5.1
+      - name: Wait before retrying the Poetry setup
+        if: ${{ steps.poetry.outcome == 'failure' }}
+        run: sleep 30
+      - name: Setup Poetry (retry)
+        if: ${{ steps.poetry.outcome == 'failure' }}
         uses: snok/install-poetry@v1.4.1
         with:
           version: 1.5.1
@@ -264,6 +274,7 @@ jobs:
           key: mozjs-bigheap-${{ env.MOZCENTRAL_VERSION }}-${{ hashFiles('setup.sh', 'patches/**') }}-${{ runner.os }}-${{ runner.arch }}
           fail-on-cache-miss: true # built by the build-mozjs-* jobs
       - name: Build wheel
+        id: build
         run: |
           echo $(poetry run python --version)
           poetry build --format=wheel
@@ -314,7 +325,7 @@ jobs:
           poetry run python -m pip install aiohttp # used by the XMLHttpRequest tests; importing pythonmonkey no longer needs it
           poetry run python -m pytest tests/python
       - name: Check the wheel works alone and vendored
-        if: ${{ (success() || failure()) }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }} # also after failed pytest
         run: |
           python -m venv ./self-contained-venv # a fresh venv: no pminit, no aiohttp
           if [[ "$OSTYPE" == "msys"* ]]; then
@@ -326,7 +337,7 @@ jobs:
           "$venv_python" .github/scripts/check_self_contained.py plain
           "$venv_python" .github/scripts/check_self_contained.py vendor
       - name: Run JS tests (peter-jr)
-        if: ${{ (success() || failure()) }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }} # also after failed Python tests
         run: |
           poetry run bash ./peter-jr ./tests/js/
   release:
