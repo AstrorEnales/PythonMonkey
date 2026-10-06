@@ -1,0 +1,352 @@
+name: 'Build bigheap wheels'
+
+# bigheap fork: complete pythonmonkey wheels (bridge and SpiderMonkey) with the fork's
+# changes, for the CPython versions and platforms MolFoundry ships.
+#
+#  - build-mozjs-*: setup.sh builds SpiderMonkey with patches/spidermonkey-gc-max-bytes.patch
+#    (lifts the 4 GiB GC heap cap), on upstream's runners and toolchains, cached per
+#    platform. The bare library is still uploaded for consumers that swap it into the
+#    official wheels.
+#  - build-wheels: Release builds of the bridge with node_modules bundled
+#    (PM_BUNDLE_NODE_MODULES=1), tested with upstream's suites and
+#    .github/scripts/check_self_contained.py.
+#  - release: pushing a tag bigheap-v<upstream version>-<n> (e.g. bigheap-v1.3.2-2)
+#    publishes the wheels, version <upstream version>+bigheap.<n>, as a GitHub release.
+#
+# Pushes to a bigheap-<upstream version> branch build <version>+bigheap.dev<run> wheels
+# as workflow artifacts. Upstream's test-and-publish workflow runs only for main and v*
+# tags, so it does not run for these refs. (workflow_dispatch only works once this file
+# is on the fork's default branch.)
+
+on:
+  push:
+    branches:
+      - 'bigheap-*'
+    tags:
+      - 'bigheap-v*'
+  workflow_dispatch:
+
+env:
+  # don't upgrade outdated brew packages because the process is too slow
+  HOMEBREW_NO_INSTALL_UPGRADE: 1
+  HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: 1
+  # apt-get should run in noninteractive mode
+  DEBIAN_FRONTEND: noninteractive
+
+defaults:
+  run:
+    # run with Git Bash on Windows
+    shell: bash
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-mozjs-unix:
+    strategy:
+      fail-fast: false
+      matrix:
+        # Linux builds run in an Ubuntu 20.04 container (glibc 2.31, matching the manylinux_2_31 wheels);
+        # macos-15 is arm64, macos-15-intel is x86_64. Upstream builds arm64 on macos-14, but only the macos-15
+        # images ship llvm@18 (with lld); the minimum macOS version is set by configure, not the runner.
+        os: [ 'ubuntu-22.04', 'ubuntu-22.04-arm', 'macos-15-intel', 'macos-15' ]
+    runs-on: ${{ matrix.os }}
+    container: ${{ (startsWith(matrix.os, 'ubuntu') && 'ubuntu:20.04') || null }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read the mozilla-central commit hash to be used
+        run: echo "MOZCENTRAL_VERSION=$(cat mozcentral.version)" >> $GITHUB_ENV
+      - name: Cache spidermonkey build
+        id: cache-spidermonkey
+        uses: actions/cache@v4
+        with:
+          path: |
+            ./_spidermonkey_install/*
+          key: mozjs-bigheap-${{ env.MOZCENTRAL_VERSION }}-${{ hashFiles('setup.sh', 'patches/**') }}-${{ runner.os }}-${{ runner.arch }}
+      - name: Setup container
+        if: ${{ startsWith(matrix.os, 'ubuntu') && steps.cache-spidermonkey.outputs.cache-hit != 'true' }}
+        run: |
+          apt-get update -y
+          apt-get install -y sudo libnss3-dev libssl-dev
+          apt-get install -y curl make git build-essential
+          apt-get install -y zlib1g-dev libbz2-dev libreadline-dev libsqlite3-dev libncursesw5-dev xz-utils tk-dev libxml2-dev libxmlsec1-dev libffi-dev liblzma-dev # required for pyenv
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tzdata
+          echo "AGENT_TOOLSDIRECTORY=/" >> $GITHUB_ENV # do not use the Python installation cached for Ubuntu 22.04
+      - name: Setup LLVM
+        if: ${{ startsWith(matrix.os, 'ubuntu') && steps.cache-spidermonkey.outputs.cache-hit != 'true' }}
+        run: |
+          apt-get install -y llvm clang
+          apt-get install -y lsb-release wget software-properties-common gnupg
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          ./llvm.sh 18 # install LLVM version 18
+          update-alternatives --install /usr/bin/llvm-config llvm-config /usr/bin/llvm-config-18 18
+          update-alternatives --install /usr/bin/clang clang /usr/bin/clang-18 18
+          update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-18 18
+          clang --version
+          clang++ --version
+      - name: Setup Python
+        if: ${{ startsWith(matrix.os, 'ubuntu') && steps.cache-spidermonkey.outputs.cache-hit != 'true' }}
+        run: |
+          # Use pyenv to install Python version that is not available via `actions/setup-python`
+          unset PYENV_ROOT
+          curl -L https://github.com/pyenv/pyenv-installer/raw/master/bin/pyenv-installer | bash
+          echo "$HOME/.pyenv/bin" >> $GITHUB_PATH # ~/.bashrc file is not read, so we need to add to GITHUB_PATH manually
+          echo "$HOME/.pyenv/shims" >> $GITHUB_PATH
+          echo "PYENV_ROOT=$HOME/.pyenv" >> $GITHUB_ENV
+          export PATH="$HOME/.pyenv/bin:$PATH"
+          pyenv install $PYTHON_VERSION
+          pyenv global $PYTHON_VERSION
+        env:
+          PYTHON_VERSION: '3.10'
+      - uses: actions/setup-python@v5
+        if: ${{ !startsWith(matrix.os, 'ubuntu') && steps.cache-spidermonkey.outputs.cache-hit != 'true' }}
+        with:
+          python-version: '3.10'
+      - name: Setup XCode
+        if: ${{ startsWith(matrix.os, 'macos') && steps.cache-spidermonkey.outputs.cache-hit != 'true' }}
+        # Xcode 16.x removed the old linker behaviour (-ld64 or -ld_classic) that SpiderMonkey relies on, so we need to switch to an older version
+        run: sudo xcode-select -switch /Applications/Xcode_16.0.app
+      - name: Provide lld as the host linker
+        if: ${{ startsWith(matrix.os, 'macos') && steps.cache-spidermonkey.outputs.cache-hit != 'true' }}
+        # Homebrew has no lld bottles for these runners any more, but the images' preinstalled llvm@18 includes it.
+        # Expose only ld64.lld, so the compiler stays Apple clang.
+        run: |
+          mkdir -p "$RUNNER_TEMP/lld-bin"
+          ln -sf "$(brew --prefix llvm@18)/bin/lld" "$RUNNER_TEMP/lld-bin/ld64.lld"
+          "$RUNNER_TEMP/lld-bin/ld64.lld" --version
+          echo "$RUNNER_TEMP/lld-bin" >> $GITHUB_PATH
+      - name: Build spidermonkey
+        if: ${{ steps.cache-spidermonkey.outputs.cache-hit != 'true' }}
+        run: ./setup.sh
+      - name: Upload the mozjs library
+        uses: actions/upload-artifact@v4
+        with:
+          name: spidermonkey-${{ env.MOZCENTRAL_VERSION }}-${{ runner.os }}-${{ runner.arch }}
+          path: |
+            ./_spidermonkey_install/lib/libmozjs-*.so
+            ./_spidermonkey_install/lib/libmozjs-*.dylib
+          if-no-files-found: error
+          retention-days: 90
+  build-mozjs-win:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read the mozilla-central commit hash to be used
+        run: echo "MOZCENTRAL_VERSION=$(cat mozcentral.version)" >> $GITHUB_ENV
+      - name: Cache spidermonkey build
+        id: cache-spidermonkey
+        uses: actions/cache@v4
+        with:
+          path: |
+            ./_spidermonkey_install/*
+          key: mozjs-bigheap-${{ env.MOZCENTRAL_VERSION }}-${{ hashFiles('setup.sh', 'patches/**') }}-${{ runner.os }}-${{ runner.arch }}
+      - name: Install dependencies
+        if: ${{ steps.cache-spidermonkey.outputs.cache-hit != 'true' }}
+        shell: powershell
+        run: |
+          # cmake and LLVM are already installed in the Github Actions runner
+          choco install -y wget make unzip
+      - name: Install MozillaBuild
+        if: ${{ steps.cache-spidermonkey.outputs.cache-hit != 'true' }}
+        run: |
+          wget -c -q https://ftp.mozilla.org/pub/mozilla/libraries/win32/MozillaBuildSetup-Latest.exe
+          powershell -command 'Start-Process -Wait -FilePath "./MozillaBuildSetup-Latest.exe" -ArgumentList "/S"'
+      - name: Build spidermonkey in MozillaBuild environment
+        if: ${{ steps.cache-spidermonkey.outputs.cache-hit != 'true' }}
+        env:
+          # Preserve MozillaBuild v4.0.x behaviour
+          # see https://groups.google.com/u/1/a/mozilla.org/g/dev-platform/c/hF51Q3j6ca8
+          USE_MINTTY: 0
+        run: /c/mozilla-build/start-shell.bat -use-full-path -here ./setup.sh
+      - name: Upload the mozjs library
+        uses: actions/upload-artifact@v4
+        with:
+          name: spidermonkey-${{ env.MOZCENTRAL_VERSION }}-${{ runner.os }}-${{ runner.arch }}
+          path: ./_spidermonkey_install/lib/mozjs-*.dll
+          if-no-files-found: error
+          retention-days: 90
+  build-wheels:
+    needs: [build-mozjs-unix, build-mozjs-win]
+    strategy:
+      fail-fast: false
+      matrix:
+        # the platforms of the build-mozjs-* jobs (macos-15 is arm64, macos-15-intel x86_64)
+        os: [ 'ubuntu-22.04', 'ubuntu-22.04-arm', 'macos-15-intel', 'macos-15', 'windows-2022' ]
+        python_version: [ '3.11', '3.12', '3.13', '3.14' ]
+    runs-on: ${{ matrix.os }}
+    # Ubuntu 20.04 (glibc 2.31) gives manylinux_2_31 wheels, like upstream's
+    container: ${{ (startsWith(matrix.os, 'ubuntu') && 'ubuntu:20.04') || null }}
+    steps:
+      - name: Setup container
+        if: ${{ startsWith(matrix.os, 'ubuntu') }}
+        run: |
+          apt-get update -y
+          apt-get install -y sudo libnss3-dev libssl-dev
+          apt-get install -y curl zlib1g-dev libbz2-dev libreadline-dev libsqlite3-dev libncursesw5-dev xz-utils tk-dev libxml2-dev libxmlsec1-dev libffi-dev liblzma-dev # required for pyenv
+          apt-get install -y git # required for `actions/checkout`
+          apt-get install -y build-essential
+          apt-get install -y strace # required to run JS tests
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tzdata # tzdata may ask for user interaction if not explicitly installed here
+          echo "AGENT_TOOLSDIRECTORY=/" >> $GITHUB_ENV # do not use the Python installation cached for Ubuntu 22.04
+          git config --global --add safe.directory '*' # silence "git failed because of dubious ownership"
+
+          # CMake 3.25 or higher is required
+          apt-get install -y ca-certificates gpg wget
+          wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/null | gpg --dearmor - | sudo tee /usr/share/keyrings/kitware-archive-keyring.gpg >/dev/null
+          echo 'deb [signed-by=/usr/share/keyrings/kitware-archive-keyring.gpg] https://apt.kitware.com/ubuntu/ focal main' | sudo tee /etc/apt/sources.list.d/kitware.list >/dev/null
+          apt-get update -y && apt-get install -y cmake
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Set the wheel version
+        # A tag bigheap-v<upstream>-<n> releases <upstream>+bigheap.<n>; a push to the
+        # bigheap-<upstream> branch builds <upstream>+bigheap.dev<run number>.
+        # poetry-dynamic-versioning uses it instead of git tags.
+        run: |
+          case "$GITHUB_REF" in
+            refs/tags/bigheap-v*) ref=${GITHUB_REF#refs/tags/bigheap-v}; version="${ref%-*}+bigheap.${ref##*-}" ;;
+            refs/heads/bigheap-*) version="${GITHUB_REF#refs/heads/bigheap-}+bigheap.dev${GITHUB_RUN_NUMBER}" ;;
+            *) echo "Run this on a bigheap-<version> branch or a bigheap-v<version>-<n> tag, not $GITHUB_REF"; exit 1 ;;
+          esac
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+\+bigheap\.(dev)?[0-9]+$ ]]; then
+            echo "Malformed version $version from $GITHUB_REF"; exit 1
+          fi
+          echo "Wheel version: $version"
+          echo "POETRY_DYNAMIC_VERSIONING_BYPASS=$version" >> $GITHUB_ENV
+      - name: Setup Python
+        if: ${{ startsWith(matrix.os, 'ubuntu') }}
+        run: |
+          # Use pyenv to install Python version that is not available via `actions/setup-python`
+          unset PYENV_ROOT
+          curl -L https://github.com/pyenv/pyenv-installer/raw/master/bin/pyenv-installer | bash
+          echo "$HOME/.pyenv/bin" >> $GITHUB_PATH # ~/.bashrc file is not read, so we need to add to GITHUB_PATH manually
+          echo "$HOME/.pyenv/shims" >> $GITHUB_PATH
+          echo "PYENV_ROOT=$HOME/.pyenv" >> $GITHUB_ENV
+          export PATH="$HOME/.pyenv/bin:$PATH"
+          pyenv install $PYTHON_VERSION
+          pyenv global $PYTHON_VERSION
+        env:
+          PYTHON_VERSION: ${{ matrix.python_version }}
+      - uses: actions/setup-python@v5
+        if: ${{ !startsWith(matrix.os, 'ubuntu') }}
+        with:
+          python-version: ${{ matrix.python_version }}
+      - uses: actions/setup-node@v4
+        # pminit's package-lock.json (lockfileVersion 3) needs npm 7 or later; Ubuntu 20.04 ships npm 6
+        with:
+          node-version: 20
+      - name: Setup Poetry
+        uses: snok/install-poetry@v1.4.1
+        with:
+          version: 1.5.1
+      - name: Install Dependencies
+        run: |
+          if [[ "$OSTYPE" == "linux-gnu"* ]]; then # Linux
+            sudo apt-get update -y
+            sudo apt-get install -y cmake llvm
+          elif [[ "$OSTYPE" == "darwin"* ]]; then # macOS
+            command -v cmake >/dev/null || brew install cmake # the runner images ship cmake
+          fi
+          poetry self add "poetry-dynamic-versioning[plugin]"
+          poetry env use python$PYTHON_VERSION || poetry env use python3 # use the correct Python version we've set up
+          poetry install --no-root --only=dev
+        env:
+          PYTHON_VERSION: ${{ matrix.python_version }}
+      - name: Read the mozilla-central commit hash to be used
+        run: echo "MOZCENTRAL_VERSION=$(cat mozcentral.version)" >> $GITHUB_ENV
+      - name: Use cached spidermonkey build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ./_spidermonkey_install/*
+          key: mozjs-bigheap-${{ env.MOZCENTRAL_VERSION }}-${{ hashFiles('setup.sh', 'patches/**') }}-${{ runner.os }}-${{ runner.arch }}
+          fail-on-cache-miss: true # built by the build-mozjs-* jobs
+      - name: Build wheel
+        run: |
+          echo $(poetry run python --version)
+          poetry build --format=wheel
+          ls -lah ./dist/
+        env:
+          BUILD_TYPE: Release
+          PM_BUNDLE_NODE_MODULES: 1
+          MACOSX_DEPLOYMENT_TARGET: '11.0' # for the bridge; ignored elsewhere
+      - name: Tag macOS wheels with the macOS version their binaries need
+        if: ${{ startsWith(matrix.os, 'macos') }}
+        # The build tags the runner's macOS version. Use the newest minimum version among the
+        # bundled binaries instead (macOS 11+ tags carry only the major version).
+        run: |
+          cd ./dist/
+          for wheel in *.whl; do
+            unpacked=$(mktemp -d)
+            unzip -q "$wheel" -d "$unpacked"
+            minos=$(for lib in "$unpacked"/pythonmonkey/*.so "$unpacked"/pythonmonkey/*.dylib; do
+                otool -l "$lib" | awk '/LC_BUILD_VERSION|LC_VERSION_MIN_MACOSX/ {found = 1} found && ($1 == "minos" || $1 == "version") {print $2; exit}'
+              done | sort -V | tail -1)
+            rm -rf "$unpacked"
+            major=${minos%%.*}
+            minor=$(echo "$minos" | cut -d. -f2)
+            if [ -z "$major" ]; then echo "Could not read the minimum macOS version of $wheel"; exit 1; fi
+            if [ "$major" -ge 11 ]; then minor=0; fi
+            tagged=$(echo "$wheel" | sed -E "s/macosx_[0-9]+_[0-9]+/macosx_${major}_${minor}/")
+            echo "$wheel -> $tagged (binaries need macOS $minos)"
+            if [ "$wheel" != "$tagged" ]; then mv "$wheel" "$tagged"; fi
+          done
+      - name: Check the Linux wheel tag
+        if: ${{ startsWith(matrix.os, 'ubuntu') }}
+        run: |
+          for wheel in ./dist/*.whl; do
+            case "$wheel" in
+              *manylinux_2_31_*) echo "$wheel" ;;
+              *) echo "Expected a manylinux_2_31 wheel: $wheel"; exit 1 ;;
+            esac
+          done
+      - name: Upload wheel as CI artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ runner.os }}-${{ runner.arch }}-Python${{ matrix.python_version }}
+          path: ./dist/*.whl
+          if-no-files-found: error
+      - name: Run Python tests (pytest)
+        run: |
+          poetry run python -m pip install --force-reinstall --no-deps ./dist/*.whl
+          poetry run python -m pip install aiohttp # used by the XMLHttpRequest tests; importing pythonmonkey no longer needs it
+          poetry run python -m pytest tests/python
+      - name: Check the wheel works alone and vendored
+        if: ${{ (success() || failure()) }}
+        run: |
+          python -m venv ./self-contained-venv # a fresh venv: no pminit, no aiohttp
+          if [[ "$OSTYPE" == "msys"* ]]; then
+            venv_python=./self-contained-venv/Scripts/python.exe
+          else
+            venv_python=./self-contained-venv/bin/python
+          fi
+          "$venv_python" -m pip install --no-deps ./dist/*.whl
+          "$venv_python" .github/scripts/check_self_contained.py plain
+          "$venv_python" .github/scripts/check_self_contained.py vendor
+      - name: Run JS tests (peter-jr)
+        if: ${{ (success() || failure()) }}
+        run: |
+          poetry run bash ./peter-jr ./tests/js/
+  release:
+    if: ${{ startsWith(github.ref, 'refs/tags/bigheap-v') }}
+    needs: [build-wheels]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download the wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-*
+          path: ./dist/
+          merge-multiple: true
+      - name: Publish the wheels as a GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -lah ./dist/
+          gh release create "$GITHUB_REF_NAME" ./dist/*.whl --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --notes "pythonmonkey wheels built from $GITHUB_SHA with the bigheap changes: SpiderMonkey GC heap past 4 GiB, external strings looked up by buffer, node_modules bundled."
