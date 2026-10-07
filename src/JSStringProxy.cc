@@ -20,6 +20,12 @@ void JSStringProxyMethodDefinitions::JSStringProxy_dealloc(JSStringProxy *self)
 {
   jsStringProxies.erase(self);
   delete self->jsString;
+  // The character data belongs to the JS string; a UTF-8 cache Python made for it does not
+  char *utf8 = ((PyCompactUnicodeObject *)self)->utf8;
+  if (utf8 && utf8 != ((PyUnicodeObject *)self)->data.any) {
+    PyObject_Free(utf8);
+  }
+  Py_TYPE(self)->tp_free((PyObject *)self);
 }
 
 PyObject *JSStringProxyMethodDefinitions::JSStringProxy_copy_method(JSStringProxy *self) {

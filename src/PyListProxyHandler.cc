@@ -2118,17 +2118,19 @@ bool PyListProxyHandler::defineProperty(
   JS::RootedValue itemV(cx, desc.value());
   PyObject *item = pyTypeFactory(cx, itemV);
   PyObject *self = JS::GetMaybePtrFromReservedSlot<PyObject>(proxy, PyObjectSlot);
-  if (PyList_SetItem(self, index, item) < 0) {
-    // we are out-of-bounds and need to expand
-    Py_ssize_t len = PyList_GET_SIZE(self);
+  Py_ssize_t len = PyList_GET_SIZE(self);
+  if (index < len) {
+    PyList_SetItem(self, index, item); // steals the reference
+  } else { // out-of-bounds: expand (a failing PyList_SetItem would already have released `item`)
     // fill the space until the inserted index
     for (Py_ssize_t i = len; i < index; i++) {
       PyList_Append(self, Py_None);
     }
 
     PyList_Append(self, item);
+    Py_DECREF(item);
 
-    // clear pending exception
+    // clear the IndexError the preceding property lookup left pending
     PyErr_Clear();
   }
 

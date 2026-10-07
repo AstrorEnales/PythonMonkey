@@ -11,7 +11,5 @@
 #include "include/FloatType.hh"
 
 PyObject *FloatType::getPyObject(double n) {
-  PyObject *doubleVal = Py_BuildValue("d", n);
-  Py_INCREF(doubleVal);
-  return doubleVal;
+  return Py_BuildValue("d", n); // new reference
 }

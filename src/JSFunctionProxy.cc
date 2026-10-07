@@ -22,6 +22,7 @@
 void JSFunctionProxyMethodDefinitions::JSFunctionProxy_dealloc(JSFunctionProxy *self)
 {
   delete self->jsFunc;
+  Py_TYPE(self)->tp_free((PyObject *)self);
 }
 
 PyObject *JSFunctionProxyMethodDefinitions::JSFunctionProxy_new(PyTypeObject *subtype, PyObject *args, PyObject *kwds) {
