@@ -24,7 +24,10 @@ elif [[ "$OSTYPE" == "darwin"* ]]; then # macOS
     command -v $tool >/dev/null || brew install $tool
   done
   command -v realpath >/dev/null || brew install coreutils # `coreutils` installs the `realpath` command
-  command -v ld64.lld >/dev/null || brew install lld # the host linker must be lld (`--enable-linker=ld64` is only for the target)
+  if ! command -v ld64.lld >/dev/null; then # the host linker must be lld (`--enable-linker=ld64` is only for the target)
+    brew install lld@19 # pinned like upstream: the unversioned lld has fewer bottles
+    export PATH="$(brew --prefix lld@19)/bin:$PATH" # lld@19 is keg-only, so Homebrew doesn't link it into its bin
+  fi
 elif [[ "$OSTYPE" == "msys"* ]]; then # Windows
   echo "Dependencies are not going to be installed automatically on Windows."
 else
@@ -42,7 +45,7 @@ CARGO_BIN="$HOME/.cargo/bin/cargo" # also works for Windows. On Windows this equ
 $CARGO_BIN install cbindgen
 # Setup Poetry
 echo "Installing poetry"
-curl -sSL https://install.python-poetry.org | python3 - --version "1.7.1"
+curl -sSL https://install.python-poetry.org | python3 - --version "1.8.5"
 if [[ "$OSTYPE" == "msys"* ]]; then # Windows
   POETRY_BIN="$APPDATA/Python/Scripts/poetry"
 else

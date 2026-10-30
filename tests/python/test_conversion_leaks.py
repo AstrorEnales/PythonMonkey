@@ -33,13 +33,20 @@ def retained_blocks(call, calls=CALLS):
 
 
 def retained_blocks_async(steps, count=2000):
-  """Allocated blocks left behind by an event-loop run of `steps(count)`."""
-  asyncio.run(steps(100))
+  """Allocated blocks left behind by an event-loop run of `steps(count)`.
+
+  The least of three runs: other tests' leftovers can allocate a few hundred blocks during any one of them,
+  while a leak keeps at least one block per step in every run.
+  """
+  asyncio.run(steps(count))  # a full-size warm-up, so that free lists and caches have grown before measuring
   settle()
-  before = sys.getallocatedblocks()
-  asyncio.run(steps(count))
-  settle()
-  return sys.getallocatedblocks() - before
+  retained = []
+  for _ in range(3):
+    before = sys.getallocatedblocks()
+    asyncio.run(steps(count))
+    settle()
+    retained.append(sys.getallocatedblocks() - before)
+  return min(retained)
 
 
 def test_numbers_returned_from_js_are_freed():
