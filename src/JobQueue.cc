@@ -43,7 +43,10 @@ bool JobQueue::enqueuePromiseJob(JSContext *cx,
 
   // Send job to the running Python event-loop
   PyEventLoop loop = PyEventLoop::getRunningLoop();
-  if (!loop.initialized()) return false;
+  if (!loop.initialized()) {
+    Py_DECREF(callback);
+    return false;
+  }
 
   // Inform the JS runtime that the job queue is no longer empty
   JS::JobQueueMayNotBeEmpty(cx);
@@ -101,8 +104,9 @@ bool JobQueue::dispatchToEventLoop(void *closure, JS::Dispatchable *dispatchable
   //    see https://docs.python.org/3/c-api/init.html#non-python-created-threads
   PyGILState_STATE gstate = PyGILState_Ensure();
 
-  PyObject *dispatchFuncTuple = PyTuple_Pack(2, PyLong_FromVoidPtr(cx), PyLong_FromVoidPtr(dispatchable));
+  PyObject *dispatchFuncTuple = Py_BuildValue("(NN)", PyLong_FromVoidPtr(cx), PyLong_FromVoidPtr(dispatchable)); // "N" steals the new references
   PyObject *pyFunc = PyCFunction_New(&callDispatchFuncDef, dispatchFuncTuple);
+  Py_DECREF(dispatchFuncTuple);
 
   // Avoid using the current, JS helper thread to send jobs to event-loop as it may cause deadlock
   PyThread_start_new_thread((void (*)(void *)) &sendJobToMainLoop, pyFunc);
@@ -117,12 +121,14 @@ bool sendJobToMainLoop(PyObject *pyFunc) {
   // Send job to the running Python event-loop on cx's thread (the main thread)
   PyEventLoop loop = PyEventLoop::getMainLoop();
   if (!loop.initialized()) {
+    Py_DECREF(pyFunc);
     PyGILState_Release(gstate);
     return false;
   }
   loop.enqueue(pyFunc);
+  Py_DECREF(pyFunc); // the event-loop job holds its own reference
 
-  loop._loop = nullptr; // the `Py_XDECREF` Python API call in `PyEventLoop`'s destructor will not be accessible once we hand over the GIL by `PyGILState_Release`
+  Py_CLEAR(loop._loop); // release it while we still hold the GIL; `PyEventLoop`'s destructor runs after `PyGILState_Release`
   PyGILState_Release(gstate);
   return true;
 }
@@ -150,7 +156,7 @@ void JobQueue::promiseRejectionTracker(JSContext *cx,
     // Set an exception handler to the event-loop
     PyObject *pmModule = PyImport_ImportModule("pythonmonkey");
     PyObject *exceptionHandler = PyObject_GetAttrString(pmModule, "simpleUncaughtExceptionHandler");
-    PyObject_CallMethod(loop._loop, "set_exception_handler", "O", exceptionHandler);
+    Py_XDECREF(PyObject_CallMethod(loop._loop, "set_exception_handler", "O", exceptionHandler));
     Py_DECREF(pmModule);
     Py_DECREF(exceptionHandler);
   }

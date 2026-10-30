@@ -46,7 +46,9 @@ static bool makeNewPyMethod(JSContext *cx, JS::MutableHandleValue function, JS::
   JS::RootedValue thisValue(cx);
   thisValue.setObject(*thisObject);
   PyObject *newSelf = pyTypeFactory(cx, thisValue);
-  function.set(jsTypeFactory(cx, PyMethod_New(func, newSelf)));
+  PyObject *newMethod = PyMethod_New(func, newSelf);
+  function.set(jsTypeFactory(cx, newMethod)); // the JS function holds its own reference
+  Py_DECREF(newMethod);
   Py_DECREF(newSelf);
 
   return true;
@@ -113,6 +115,9 @@ static bool array_push(JSContext *cx, unsigned argc, JS::Value *vp) { // surely 
   for (unsigned index = 0; index < numArgs; index++) {
     elementVal.set(args[index].get());
     PyObject *value = pyTypeFactory(cx, elementVal);
+    if (!value) {
+      return false;
+    }
     if (PyList_Append(self, value) < 0) {
       Py_DECREF(value);
       return false;
@@ -144,11 +149,14 @@ static bool array_shift(JSContext *cx, unsigned argc, JS::Value *vp) {
   if (!result) {
     return false;
   }
+  Py_INCREF(result); // removing it from the list would otherwise free it
   if (PySequence_DelItem(self, 0) < 0) {
+    Py_DECREF(result);
     return false;
   }
 
   args.rval().set(jsTypeFactory(cx, result));
+  Py_DECREF(result);
   return true;
 }
 
@@ -165,6 +173,9 @@ static bool array_unshift(JSContext *cx, unsigned argc, JS::Value *vp) { // sure
   for (int index = args.length() - 1; index >= 0; index--) {
     elementVal.set(args[index].get());
     PyObject *value = pyTypeFactory(cx, elementVal);
+    if (!value) {
+      return false;
+    }
     if (PyList_Insert(self, 0, value) < 0) {
       Py_DECREF(value);
       return false;
@@ -280,6 +291,9 @@ static bool array_indexOf(JSContext *cx, unsigned argc, JS::Value *vp) {
 
   JS::RootedValue elementVal(cx, args[0].get());
   PyObject *value = pyTypeFactory(cx, elementVal);
+  if (!value) {
+    return false;
+  }
   PyObject *result = PyObject_CallMethod(self, "index", "Oi", value, start);
   Py_DECREF(value);
 
@@ -356,6 +370,7 @@ static bool array_splice(JSContext *cx, unsigned argc, JS::Value *vp) {
   // build list for SetSlice call
   PyObject *inserted = PyList_New(insertCount);
   if (!inserted) {
+    Py_DECREF(deleted);
     return false;
   }
 
@@ -363,12 +378,17 @@ static bool array_splice(JSContext *cx, unsigned argc, JS::Value *vp) {
   for (int index = 0; index < insertCount; index++) {
     elementVal.set(args[index + 2].get());
     PyObject *value = pyTypeFactory(cx, elementVal);
-    if (PyList_SetItem(inserted, index, value) < 0) {
+    if (!value || PyList_SetItem(inserted, index, value) < 0) {
+      Py_DECREF(inserted);
+      Py_DECREF(deleted);
       return false;
     }
   }
 
-  if (PyList_SetSlice(self, actualStart, actualStart + actualDeleteCount, inserted) < 0) {
+  int status = PyList_SetSlice(self, actualStart, actualStart + actualDeleteCount, inserted);
+  Py_DECREF(inserted); // PyList_SetSlice doesn't steal it
+  if (status < 0) {
+    Py_DECREF(deleted);
     return false;
   }
 
@@ -428,11 +448,15 @@ static bool array_fill(JSContext *cx, unsigned argc, JS::Value *vp) {
 
   JS::RootedValue fillValue(cx, args[0].get());
   PyObject *fillValueItem = pyTypeFactory(cx, fillValue);
+  if (!fillValueItem) {
+    return false;
+  }
   for (int index = actualStart; index < actualEnd; index++) {
     // Since each call of `PyList_SetItem` steals a reference (even if its to the same object),
     // We need multiple references to it for it to steal.
     Py_INCREF(fillValueItem);
     if (PyList_SetItem(self, index, fillValueItem) < 0) {
+      Py_DECREF(fillValueItem);
       return false;
     }
   }
@@ -513,6 +537,7 @@ static bool array_copyWithin(JSContext *cx, unsigned argc, JS::Value *vp) {
 
     while (count > 0) {
       PyObject *itemStart = PyList_GetItem(self, actualStart);
+      Py_INCREF(itemStart); // PyList_SetItem steals a reference
       if (PyList_SetItem(self, actualTarget, itemStart) < 0) {
         return false;
       }
@@ -524,6 +549,7 @@ static bool array_copyWithin(JSContext *cx, unsigned argc, JS::Value *vp) {
   } else {
     while (count > 0) {
       PyObject *itemStart = PyList_GetItem(self, actualStart);
+      Py_INCREF(itemStart); // PyList_SetItem steals a reference
       if (PyList_SetItem(self, actualTarget, itemStart) < 0) {
         return false;
       }
@@ -557,18 +583,24 @@ static bool array_concat(JSContext *cx, unsigned argc, JS::Value *vp) {
     elementVal.set(args[index].get());
 
     PyObject *item = pyTypeFactory(cx, elementVal);
+    if (!item) {
+      Py_DECREF(result);
+      return false;
+    }
     if (PyObject_TypeCheck(item, &JSArrayProxyType)) {
       // flatten the array only a depth 1
       Py_ssize_t itemLength = JSArrayProxyMethodDefinitions::JSArrayProxy_length((JSArrayProxy *)item);
       for (Py_ssize_t flatIndex = 0; flatIndex < itemLength; flatIndex++) {
         if (!JS_GetElement(cx, *(((JSArrayProxy *)item)->jsArray), flatIndex, &elementVal)) {
           Py_DECREF(item);
+          Py_DECREF(result);
           return false;
         }
         PyObject *value = pyTypeFactory(cx, elementVal);
-        if (PyList_Append(result, value) < 0) {
+        if (!value || PyList_Append(result, value) < 0) {
           Py_DECREF(item);
-          Py_DECREF(value);
+          Py_XDECREF(value);
+          Py_DECREF(result);
           return false;
         }
         Py_DECREF(value);
@@ -580,18 +612,17 @@ static bool array_concat(JSContext *cx, unsigned argc, JS::Value *vp) {
       for (Py_ssize_t flatIndex = 0; flatIndex < itemLength; flatIndex++) {
         if (PyList_Append(result, PyList_GetItem(item, flatIndex)) < 0) {
           Py_DECREF(item);
+          Py_DECREF(result);
           return false;
         }
       }
     }
     else {
-      PyObject *value = pyTypeFactory(cx, elementVal);
-      if (PyList_Append(result, value) < 0) {
+      if (PyList_Append(result, item) < 0) {
         Py_DECREF(item);
-        Py_DECREF(value);
+        Py_DECREF(result);
         return false;
       }
-      Py_DECREF(value);
     }
 
     Py_DECREF(item);
@@ -643,6 +674,9 @@ static bool array_lastIndexOf(JSContext *cx, unsigned argc, JS::Value *vp) {
 
   JS::RootedValue elementVal(cx, args[0].get());
   PyObject *element = pyTypeFactory(cx, elementVal);
+  if (!element) {
+    return false;
+  }
   for (int64_t index = start; index >= 0; index--) {
     PyObject *item = PyList_GetItem(self, index);
     Py_INCREF(item);
@@ -1350,23 +1384,23 @@ static uint32_t FlattenIntoArrayWithCallBack(JSContext *cx,
       shouldFlatten = false;
     }
 
-    Py_ssize_t elementLen;
-    if (PyObject_TypeCheck(element, &JSArrayProxyType)) {
-      elementLen = JSArrayProxyMethodDefinitions::JSArrayProxy_length((JSArrayProxy *)element);
-    }
-    else if (PyObject_TypeCheck(element, &PyList_Type)) {
-      elementLen = PyList_GET_SIZE(element);
-    }
-
     if (shouldFlatten) {
-      targetIndex = FlattenIntoArrayWithCallBack(cx,
+      Py_ssize_t elementLen;
+      if (PyObject_TypeCheck(element, &JSArrayProxyType)) {
+        elementLen = JSArrayProxyMethodDefinitions::JSArrayProxy_length((JSArrayProxy *)element);
+      }
+      else {
+        elementLen = PyList_GET_SIZE(element);
+      }
+
+      // the callback result is flattened as is: the callback only applies to the source's own elements
+      //    see https://tc39.es/ecma262/#sec-flattenintoarray
+      targetIndex = FlattenIntoArray(cx,
         retArray,
         element,
         elementLen,
         targetIndex,
-        depth - 1,
-        callBack,
-        thisArg
+        depth - 1
       );
     }
     else {
@@ -1374,36 +1408,13 @@ static uint32_t FlattenIntoArrayWithCallBack(JSContext *cx,
 
       uint32_t length;
       JS::GetArrayLength(cx, rootedRetArray, &length);
-
-      if (PyObject_TypeCheck(element, &JSArrayProxyType) || PyObject_TypeCheck(element, &PyList_Type)) {
-        // flatten array callBack result to depth 1
-        JS::RootedValue elementIndexVal(cx);
-        for (uint32_t elementIndex = 0; elementIndex < elementLen; elementIndex++, targetIndex++) {
-          if (PyObject_TypeCheck(element, &JSArrayProxyType)) {
-            JS_GetElement(cx, *(((JSArrayProxy *)element)->jsArray), elementIndex, &elementIndexVal);
-          }
-          else {
-            elementIndexVal.set(jsTypeFactory(cx, PyList_GetItem(element, elementIndex)));
-          }
-
-          if (targetIndex >= length) {
-            JS::SetArrayLength(cx, rootedRetArray, length = targetIndex + 1);
-          }
-
-          JS_SetElement(cx, rootedRetArray, targetIndex, elementIndexVal);
-        }
-
-        return targetIndex;
+      if (targetIndex >= length) {
+        JS::SetArrayLength(cx, rootedRetArray, targetIndex + 1);
       }
-      else {
-        if (targetIndex >= length) {
-          JS::SetArrayLength(cx, rootedRetArray, targetIndex + 1);
-        }
 
-        JS_SetElement(cx, rootedRetArray, targetIndex, retVal);
+      JS_SetElement(cx, rootedRetArray, targetIndex, retVal);
 
-        targetIndex++;
-      }
+      targetIndex++;
     }
 
     Py_DECREF(element);
@@ -1802,7 +1813,8 @@ static bool iterator_next(JSContext *cx, unsigned argc, JS::Value *vp) {
   JS::RootedObject thisObj(cx);
   if (!args.computeThis(cx, &thisObj)) return false;
 
-  PyObject *self = JS::GetMaybePtrFromReservedSlot<PyObject>(thisObj, ListIteratorSlotIteratedObject);
+  JS::RootedObject proxy(cx, &JS::GetReservedSlot(thisObj, ListIteratorSlotIteratedObject).toObject());
+  PyObject *self = JS::GetMaybePtrFromReservedSlot<PyObject>(proxy, PyObjectSlot);
 
   JS::RootedValue rootedNextIndex(cx, JS::GetReservedSlot(thisObj, ListIteratorSlotNextIndex));
   JS::RootedValue rootedItemKind(cx, JS::GetReservedSlot(thisObj, ListIteratorSlotItemKind));
@@ -1911,7 +1923,6 @@ static bool array_iterator_func(JSContext *cx, unsigned argc, JS::Value *vp, int
   if (!proxy) {
     return false;
   }
-  PyObject *self = JS::GetMaybePtrFromReservedSlot<PyObject>(proxy, PyObjectSlot);
 
   JS::RootedObject global(cx, JS::GetNonCCWObjectGlobal(proxy));
 
@@ -1934,7 +1945,8 @@ static bool array_iterator_func(JSContext *cx, unsigned argc, JS::Value *vp, int
   if (!JS::Construct(cx, constructor_val, JS::HandleValueArray::empty(), &obj)) return false;
   if (!obj) return false;
 
-  JS::SetReservedSlot(obj, ListIteratorSlotIteratedObject, JS::PrivateValue((void *)self));
+  // the proxy, not the bare list: the GC keeps the proxy alive and so its reference to the list
+  JS::SetReservedSlot(obj, ListIteratorSlotIteratedObject, JS::ObjectValue(*proxy));
   JS::SetReservedSlot(obj, ListIteratorSlotNextIndex, JS::Int32Value(0));
   JS::SetReservedSlot(obj, ListIteratorSlotItemKind, JS::Int32Value(itemKind));
 
@@ -2117,6 +2129,9 @@ bool PyListProxyHandler::defineProperty(
 
   JS::RootedValue itemV(cx, desc.value());
   PyObject *item = pyTypeFactory(cx, itemV);
+  if (!item) {
+    return false;
+  }
   PyObject *self = JS::GetMaybePtrFromReservedSlot<PyObject>(proxy, PyObjectSlot);
   Py_ssize_t len = PyList_GET_SIZE(self);
   if (index < len) {
@@ -2161,6 +2176,7 @@ bool PyListProxyHandler::delete_(JSContext *cx, JS::HandleObject proxy, JS::Hand
   }
 
   // Set to undefined instead of actually deleting it
+  Py_INCREF(Py_None); // PyList_SetItem steals it
   if (PyList_SetItem(self, index, Py_None) < 0) {
     return result.failCantDelete();
   }

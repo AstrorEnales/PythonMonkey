@@ -69,18 +69,16 @@ PyObject *JSObjectIterProxyMethodDefinitions::JSObjectIterProxy_nextkey(JSObject
 
       PyObject *ret;
       if (self->it.kind == KIND_ITEMS) {
-        ret = PyTuple_Pack(2, key, value);
+        ret = PyTuple_Pack(2, key, value); // takes its own references
+        Py_DECREF(key);
+        Py_DECREF(value);
       }
       else if (self->it.kind == KIND_VALUES) {
         ret = value;
+        Py_DECREF(key);
       }
       else {
         ret = key;
-      }
-
-      Py_INCREF(ret);
-      if (self->it.kind != KIND_KEYS) {
-        Py_DECREF(value);
       }
 
       return ret;
@@ -99,18 +97,16 @@ PyObject *JSObjectIterProxyMethodDefinitions::JSObjectIterProxy_nextkey(JSObject
 
       PyObject *ret;
       if (self->it.kind == KIND_ITEMS) {
-        ret = PyTuple_Pack(2, key, value);
+        ret = PyTuple_Pack(2, key, value); // takes its own references
+        Py_DECREF(key);
+        Py_DECREF(value);
       }
       else if (self->it.kind == KIND_VALUES) {
         ret = value;
+        Py_DECREF(key);
       }
       else {
         ret = key;
-      }
-
-      Py_INCREF(ret);
-      if (self->it.kind != KIND_KEYS) {
-        Py_DECREF(value);
       }
 
       return ret;

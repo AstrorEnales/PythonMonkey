@@ -39,7 +39,10 @@ static bool enqueueWithDelay(JSContext *cx, unsigned argc, JS::Value *vp) {
   PyObject *job = pyTypeFactory(cx, jobArg);
   // Schedule job to the running Python event-loop
   PyEventLoop loop = PyEventLoop::getRunningLoop();
-  if (!loop.initialized()) return false;
+  if (!loop.initialized()) {
+    Py_DECREF(job);
+    return false;
+  }
   PyEventLoop::AsyncHandle::id_t handleId = loop.enqueueWithDelay(job, delaySeconds, repeat);
   Py_DECREF(job);
 
@@ -65,6 +68,7 @@ static bool cancelByTimeoutId(JSContext *cx, unsigned argc, JS::Value *vp) {
   // Cancel this job on the Python event-loop
   handle->cancel();
   handle->removeRef();
+  handle->release();
 
   return true;
 }
@@ -117,8 +121,12 @@ static bool getDebugInfo(JSContext *cx, unsigned argc, JS::Value *vp) {
   AsyncHandle *handle = AsyncHandle::fromId((uint32_t)timeoutID);
   if (!handle) return false; // error no such timeoutID
 
-  JS::Value debugInfo = jsTypeFactory(cx, handle->getDebugInfo());
-  args.rval().set(debugInfo);
+  PyObject *debugInfo = handle->getDebugInfo();
+  if (debugInfo) {
+    args.rval().set(jsTypeFactory(cx, debugInfo));
+  } else { // released, as the timer is finished or cancelled
+    args.rval().setUndefined();
+  }
   return true;
 }
 
@@ -128,6 +136,7 @@ static bool getAllRefedTimersDebugInfo(JSContext *cx, unsigned argc, JS::Value *
   JS::RootedVector<JS::Value> results(cx);
   for (AsyncHandle &timer: AsyncHandle::getAllTimers()) {
     if (!timer.hasRef()) continue; // we only need ref'ed timers
+    if (!timer.getDebugInfo()) continue; // finished or cancelled
 
     JS::Value debugInfo = jsTypeFactory(cx, timer.getDebugInfo());
     if (!results.append(debugInfo)) {

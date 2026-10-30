@@ -40,6 +40,7 @@ public:
     ~AsyncHandle() {
       if (Py_IsInitialized()) { // the Python runtime has already been finalized when `_timeoutIdMap` is cleared at exit
         Py_XDECREF(_handle);
+        Py_XDECREF(_debugInfo);
       }
     }
 
@@ -48,6 +49,7 @@ public:
      * @return the timeoutId
      */
     static inline id_t newEmpty() {
+      Py_INCREF(Py_None);
       auto handle = AsyncHandle(Py_None);
       return AsyncHandle::getUniqueId(std::move(handle));
     }
@@ -65,6 +67,11 @@ public:
      * @return true if the job function has already been executed or cancelled.
      */
     bool _finishedOrCancelled();
+    /**
+     * @brief Release the `asyncio.Handle` (and so the job function) and the debug info of a timer that won't run again.
+     * The timer then counts as finished and cancelled.
+     */
+    void release();
 
     /**
      * @brief Get the unique `timeoutID` for JS `setTimeout`/`clearTimeout` methods
@@ -138,7 +145,7 @@ public:
      * @brief Set the debug info object for WTFPythonMonkey tool
      */
     inline void setDebugInfo(PyObject *obj) {
-      _debugInfo = obj;
+      Py_XDECREF(std::exchange(_debugInfo, obj));
     }
     inline PyObject *getDebugInfo() {
       return _debugInfo;

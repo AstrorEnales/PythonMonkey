@@ -30,6 +30,10 @@ static bool array_valueOf(JSContext *cx, unsigned argc, JS::Value *vp) {
   JS::RootedObject rootedArrayBuffer(cx, arrayBuffer->get());
 
   auto byteLength = JS::GetArrayBufferByteLength(rootedArrayBuffer);
+  if (byteLength == 0) { // the buffer below always holds at least the first number
+    args.rval().setString(JS_GetEmptyString(cx));
+    return true;
+  }
 
   bool isSharedMemory;
   JS::AutoCheckCannotGC autoNoGC(cx);
@@ -44,6 +48,7 @@ static bool array_valueOf(JSContext *cx, unsigned argc, JS::Value *vp) {
   JS::Latin1Char *buffer = (JS::Latin1Char *)malloc(sizeof(JS::Latin1Char) * STRING_LENGTH);
 
   if (snprintf((char *)&buffer[0], 3 + 1, "%hu", data[0]) < 0) {
+    free(buffer);
     return false;
   }
   size_t charIndex = data[0] < 10 ? 1 : data[0] < 100 ? 2 : 3;
@@ -52,6 +57,7 @@ static bool array_valueOf(JSContext *cx, unsigned argc, JS::Value *vp) {
     buffer[charIndex] = ',';
     charIndex++;
     if (snprintf((char *)&buffer[charIndex], 3 + 1, "%hu", data[dataIndex]) < 0) {
+      free(buffer);
       return false;
     }
     charIndex += data[dataIndex] < 10 ? 1 : data[dataIndex] < 100 ? 2 : 3;
@@ -88,7 +94,8 @@ static bool iterator_next(JSContext *cx, unsigned argc, JS::Value *vp) {
   JS::RootedObject thisObj(cx);
   if (!args.computeThis(cx, &thisObj)) return false;
 
-  JS::PersistentRootedObject *arrayBuffer = JS::GetMaybePtrFromReservedSlot<JS::PersistentRootedObject>(thisObj, BytesIteratorSlotIteratedObject);
+  JS::RootedObject proxy(cx, &JS::GetReservedSlot(thisObj, BytesIteratorSlotIteratedObject).toObject());
+  JS::PersistentRootedObject *arrayBuffer = JS::GetMaybePtrFromReservedSlot<JS::PersistentRootedObject>(proxy, OtherSlot);
   JS::RootedObject rootedArrayBuffer(cx, arrayBuffer->get());
 
   JS::RootedValue rootedNextIndex(cx, JS::GetReservedSlot(thisObj, BytesIteratorSlotNextIndex));
@@ -220,9 +227,8 @@ static bool array_iterator_func(JSContext *cx, unsigned argc, JS::Value *vp, int
   if (!JS::Construct(cx, constructor_val, JS::HandleValueArray::empty(), &obj)) return false;
   if (!obj) return false;
 
-  JS::PersistentRootedObject *arrayBuffer = JS::GetMaybePtrFromReservedSlot<JS::PersistentRootedObject>(proxy, OtherSlot);
-
-  JS::SetReservedSlot(obj, BytesIteratorSlotIteratedObject, JS::PrivateValue(arrayBuffer));
+  // the proxy, not its ArrayBuffer root: that root is deleted once the proxy is finalized, which the GC prevents while we hold the proxy
+  JS::SetReservedSlot(obj, BytesIteratorSlotIteratedObject, JS::ObjectValue(*proxy));
   JS::SetReservedSlot(obj, BytesIteratorSlotNextIndex, JS::Int32Value(0));
   JS::SetReservedSlot(obj, BytesIteratorSlotItemKind, JS::Int32Value(itemKind));
 
@@ -415,11 +421,14 @@ bool PyBytesProxyHandler::getOwnPropertyDescriptor(
   PyObject *attrName = idToKey(cx, id);
   PyObject *self = JS::GetMaybePtrFromReservedSlot<PyObject>(proxy, PyObjectSlot);
   PyObject *item = PyObject_GetAttr(self, attrName);
+  Py_DECREF(attrName);
   if (!item && PyErr_ExceptionMatches(PyExc_AttributeError)) {
     PyErr_Clear(); // clear error, we will be returning undefined in this case
   }
 
-  return handleGetOwnPropertyDescriptor(cx, id, desc, item);
+  bool success = handleGetOwnPropertyDescriptor(cx, id, desc, item);
+  Py_XDECREF(item); // the JS value holds its own reference where it needs one
+  return success;
 }
 
 void PyBytesProxyHandler::finalize(JS::GCContext *gcx, JSObject *proxy) const {

@@ -45,6 +45,7 @@ static bool onResolvedCb(JSContext *cx, unsigned argc, JS::Value *vp) {
     // Preserve the original JS value as the `jsError` attribute for lossless conversion back
     PyObject *originalJsErrCapsule = DictType::getPyObject(cx, resultArg);
     PyObject_SetAttrString(wrapped, "jsError", originalJsErrCapsule);
+    Py_XDECREF(originalJsErrCapsule);
     Py_DECREF(result);
     result = wrapped;
   }
@@ -131,9 +132,11 @@ JSObject *PromiseType::toJsPromise(JSContext *cx, PyObject *pyObject) {
 
   // Resolve or Reject the JS Promise once the python awaitable is done
   JS::PersistentRooted<JSObject *> *rootedPtr = new JS::PersistentRooted<JSObject *>(cx, promise); // `promise` is required to be rooted from here to the end of onDoneCallback
-  PyObject *futureCallbackTuple = PyTuple_Pack(2, PyLong_FromVoidPtr(cx), PyLong_FromVoidPtr(rootedPtr));
+  PyObject *futureCallbackTuple = Py_BuildValue("(NN)", PyLong_FromVoidPtr(cx), PyLong_FromVoidPtr(rootedPtr)); // "N" steals the new references
   PyObject *onDoneCb = PyCFunction_New(&futureCallbackDef, futureCallbackTuple);
+  Py_DECREF(futureCallbackTuple);
   future.addDoneCallback(onDoneCb);
+  Py_DECREF(onDoneCb); // the Future holds its own reference until it is done
   Py_INCREF(pyObject);
   return promise;
 }

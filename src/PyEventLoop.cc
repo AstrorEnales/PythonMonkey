@@ -57,6 +57,7 @@ static PyObject *timerJobWrapper(PyObject *jobFn, PyObject *args) {
     _enqueueWithDelay(_loop, handleId, jobFn, delaySeconds, repeat);
   } else {
     handle->removeRef();
+    handle->release(); // the timer won't run again
   }
 
   if (errType != NULL) { // PyErr_Occurred()
@@ -74,6 +75,7 @@ PyEventLoop::AsyncHandle PyEventLoop::enqueue(PyObject *jobFn) {
   // Enqueue job to the Python event-loop
   //    https://docs.python.org/3/library/asyncio-eventloop.html#asyncio.loop.call_soon
   PyObject *asyncHandle = PyObject_CallMethod(_loop, "call_soon_threadsafe", "O", wrapper);
+  Py_DECREF(wrapper); // the event-loop holds its own reference until the job has run
   return PyEventLoop::AsyncHandle(asyncHandle);
 }
 
@@ -82,6 +84,7 @@ static PyObject *_enqueueWithDelay(PyObject *_loop, PyEventLoop::AsyncHandle::id
   // Schedule job to the Python event-loop
   //    https://docs.python.org/3/library/asyncio-eventloop.html#asyncio.loop.call_later
   PyObject *asyncHandle = PyObject_CallMethod(_loop, "call_later", "dOOIdb", delaySeconds, wrapper, _loop, handleId, delaySeconds, repeat); // https://docs.python.org/3/c-api/arg.html#c.Py_BuildValue
+  Py_DECREF(wrapper); // the asyncio.TimerHandle holds its own reference
   if (!asyncHandle) {
     return nullptr; // RuntimeError
   }
@@ -254,6 +257,9 @@ void PyEventLoop::AsyncHandle::cancel() {
   if (!_finishedOrCancelled()) {
     removeRef(); // automatically unref at finish
   }
+  if (_handle == Py_None) { // never scheduled, or already released
+    return;
+  }
 
   // https://docs.python.org/3/library/asyncio-eventloop.html#asyncio.Handle.cancel
   PyObject *ret = PyObject_CallMethod(_handle, "cancel", NULL); // returns None
@@ -269,6 +275,9 @@ bool PyEventLoop::AsyncHandle::cancelAll() {
 }
 
 bool PyEventLoop::AsyncHandle::cancelled() {
+  if (_handle == Py_None) { // released by clearTimeout/clearInterval
+    return true;
+  }
   // https://docs.python.org/3/library/asyncio-eventloop.html#asyncio.Handle.cancelled
   PyObject *ret = PyObject_CallMethod(_handle, "cancelled", NULL); // returns Python bool
   bool cancelled = ret == Py_True;
@@ -276,7 +285,16 @@ bool PyEventLoop::AsyncHandle::cancelled() {
   return cancelled;
 }
 
+void PyEventLoop::AsyncHandle::release() {
+  Py_CLEAR(_debugInfo);
+  Py_INCREF(Py_None);
+  Py_XDECREF(swap(Py_None)); // drops the asyncio.TimerHandle, and with it the job function
+}
+
 bool PyEventLoop::AsyncHandle::_finishedOrCancelled() {
+  if (_handle == Py_None) { // never scheduled, or already released
+    return true;
+  }
   PyObject *scheduled = PyObject_GetAttrString(_handle, "_scheduled"); // this attribute only exists on asyncio.TimerHandle returned by loop.call_later
                                                                        // NULL if no such attribute (on a strict asyncio.Handle returned by loop.call_soon)
   bool notScheduled = scheduled && scheduled == Py_False; // not scheduled means the job function has already been executed or canceled

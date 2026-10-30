@@ -330,7 +330,8 @@ createRequireInner = pm.eval("""'use strict';(
 function createRequireInner(filename, bootstrap, extraPaths, isMain)
 {
   const CtxModule = bootstrap.modules['ctx-module'].CtxModule;
-  const moduleCache = globalThis.require?.cache || {};
+  // one cache for all require functions, as in Node.js: a fresh cache per call would load and run every module again
+  const moduleCache = globalThis.require?.cache || (bootstrap.moduleCache ??= {});
 
   function loadPythonModule(module, filename)
   {

@@ -50,6 +50,7 @@ static bool iter_next(JSContext *cx, JS::CallArgs args, PyObject *it) {
   if (!JS_SetProperty(cx, result, "done", done)) return false;
 
   JS::RootedValue value(cx, jsTypeFactory(cx, item));
+  Py_DECREF(item);
   if (!JS_SetProperty(cx, result, "value", value)) return false;
 
   args.rval().setObject(*result);
@@ -91,6 +92,7 @@ static bool toPrimitive(JSContext *cx, unsigned argc, JS::Value *vp) {
   Py_DECREF(s);
 
   if (res < 0) {
+    _PyUnicodeWriter_Dealloc(&writer);
     args.rval().setString(JS_NewStringCopyZ(cx, "<cannot repr type>"));
     return true;
   }
@@ -98,6 +100,7 @@ static bool toPrimitive(JSContext *cx, unsigned argc, JS::Value *vp) {
   PyObject *repr = _PyUnicodeWriter_Finish(&writer);
 
   args.rval().set(jsTypeFactory(cx, repr));
+  Py_XDECREF(repr);
   return true;
 }
 
@@ -126,7 +129,8 @@ static bool iterator_next(JSContext *cx, unsigned argc, JS::Value *vp) {
   JS::RootedObject thisObj(cx);
   if (!args.computeThis(cx, &thisObj)) return false;
 
-  PyObject *it = JS::GetMaybePtrFromReservedSlot<PyObject>(thisObj, IterableIteratorSlotIterableObject);
+  JS::RootedObject proxy(cx, &JS::GetReservedSlot(thisObj, IterableIteratorSlotIterableObject).toObject());
+  PyObject *it = JS::GetMaybePtrFromReservedSlot<PyObject>(proxy, PyObjectSlot);
 
   return iter_next(cx, args, it);
 }
@@ -179,8 +183,6 @@ static bool iterable_values(JSContext *cx, unsigned argc, JS::Value *vp) {
     return false;
   }
 
-  PyObject *self = JS::GetMaybePtrFromReservedSlot<PyObject>(proxy, PyObjectSlot);
-
   JS::RootedObject global(cx, JS::GetNonCCWObjectGlobal(proxy));
 
   JS::RootedValue constructor_val(cx);
@@ -202,7 +204,8 @@ static bool iterable_values(JSContext *cx, unsigned argc, JS::Value *vp) {
   if (!JS::Construct(cx, constructor_val, JS::HandleValueArray::empty(), &obj)) return false;
   if (!obj) return false;
 
-  JS::SetReservedSlot(obj, IterableIteratorSlotIterableObject, JS::PrivateValue((void *)self));
+  // the proxy, not the bare iterator: the GC keeps the proxy alive and so its reference to the iterator
+  JS::SetReservedSlot(obj, IterableIteratorSlotIterableObject, JS::ObjectValue(*proxy));
 
   args.rval().setObject(*obj);
   return true;
@@ -293,9 +296,12 @@ bool PyIterableProxyHandler::getOwnPropertyDescriptor(
   PyObject *attrName = idToKey(cx, id);
   PyObject *self = JS::GetMaybePtrFromReservedSlot<PyObject>(proxy, PyObjectSlot);
   PyObject *item = PyObject_GetAttr(self, attrName);
+  Py_DECREF(attrName);
   if (!item && PyErr_ExceptionMatches(PyExc_AttributeError)) {
     PyErr_Clear(); // clear error, we will be returning undefined in this case
   }
 
-  return handleGetOwnPropertyDescriptor(cx, id, desc, item);
+  bool success = handleGetOwnPropertyDescriptor(cx, id, desc, item);
+  Py_XDECREF(item); // the JS value holds its own reference where it needs one
+  return success;
 }

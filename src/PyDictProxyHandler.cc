@@ -32,14 +32,18 @@ bool PyDictProxyHandler::ownPropertyKeys(JSContext *cx, JS::HandleObject proxy, 
 
   size_t length = PyList_Size(keys);
 
-  return handleOwnPropertyKeys(cx, keys, length, props);
+  bool success = handleOwnPropertyKeys(cx, keys, length, props);
+  Py_DECREF(keys);
+  return success;
 }
 
 bool PyDictProxyHandler::delete_(JSContext *cx, JS::HandleObject proxy, JS::HandleId id,
   JS::ObjectOpResult &result) const {
   PyObject *attrName = idToKey(cx, id);
   PyObject *self = JS::GetMaybePtrFromReservedSlot<PyObject>(proxy, PyObjectSlot);
-  if (PyDict_DelItem(self, attrName) < 0) {
+  int status = PyDict_DelItem(self, attrName);
+  Py_DECREF(attrName);
+  if (status < 0) {
     return result.failCantDelete(); // raises JS exception
   }
   return result.succeed();
@@ -57,6 +61,7 @@ bool PyDictProxyHandler::getOwnPropertyDescriptor(
   PyObject *attrName = idToKey(cx, id);
   PyObject *self = JS::GetMaybePtrFromReservedSlot<PyObject>(proxy, PyObjectSlot);
   PyObject *item = PyDict_GetItemWithError(self, attrName); // returns NULL without an exception set if the key wasn’t present.
+  Py_DECREF(attrName);
 
   return handleGetOwnPropertyDescriptor(cx, id, desc, item);
 }
@@ -69,11 +74,12 @@ bool PyDictProxyHandler::set(JSContext *cx, JS::HandleObject proxy, JS::HandleId
 
   PyObject *self = JS::GetMaybePtrFromReservedSlot<PyObject>(proxy, PyObjectSlot);
   PyObject *value = pyTypeFactory(cx, rootedV);
-  if (PyDict_SetItem(self, attrName, value)) {
-    Py_DECREF(value);
+  int status = PyDict_SetItem(self, attrName, value);
+  Py_DECREF(attrName);
+  Py_DECREF(value);
+  if (status < 0) {
     return result.failCantSetInterposed(); // raises JS exception
   }
-  Py_DECREF(value);
   return result.succeed();
 }
 
@@ -87,6 +93,7 @@ bool PyDictProxyHandler::hasOwn(JSContext *cx, JS::HandleObject proxy, JS::Handl
   PyObject *attrName = idToKey(cx, id);
   PyObject *self = JS::GetMaybePtrFromReservedSlot<PyObject>(proxy, PyObjectSlot);
   *bp = PyDict_Contains(self, attrName) == 1;
+  Py_DECREF(attrName);
   return true;
 }
 

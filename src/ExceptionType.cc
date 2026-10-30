@@ -37,6 +37,7 @@ PyObject *ExceptionType::getPyObject(JSContext *cx, JS::HandleObject error) {
   // Preserve the original JS Error object as the Python Exception's `jsError` attribute for lossless two-way conversion
   PyObject *originalJsErrCapsule = DictType::getPyObject(cx, errValue);
   PyObject_SetAttrString(pyObject, "jsError", originalJsErrCapsule);
+  Py_XDECREF(originalJsErrCapsule);
 
   return pyObject;
 }
@@ -84,8 +85,11 @@ JSObject *ExceptionType::toJsError(JSContext *cx, PyObject *exceptionValue, PyOb
   if (PyObject_HasAttrString(exceptionValue, "jsError")) {
     PyObject *originalJsErrCapsule = PyObject_GetAttrString(exceptionValue, "jsError");
     if (originalJsErrCapsule && PyObject_TypeCheck(originalJsErrCapsule, &JSObjectProxyType)) {
-      return *((JSObjectProxy *)originalJsErrCapsule)->jsObject;
+      JSObject *originalJsErr = *((JSObjectProxy *)originalJsErrCapsule)->jsObject;
+      Py_DECREF(originalJsErrCapsule); // the exception's `jsError` attribute keeps it alive
+      return originalJsErr;
     }
+    Py_XDECREF(originalJsErrCapsule);
   }
 
   // Gather JS context
@@ -267,19 +271,21 @@ JSObject *ExceptionType::toJsError(JSContext *cx, PyObject *exceptionValue, PyOb
 
     {
       std::stringstream msgStream;
-      msgStream << "Python " << pyErrTypeName << ": " << PyUnicode_AsUTF8(pyErrMsg) << "\n" << PyUnicode_AsUTF8(_PyUnicodeWriter_Finish(&writer));
+      PyObject *traceback = _PyUnicodeWriter_Finish(&writer);
+      msgStream << "Python " << pyErrTypeName << ": " << PyUnicode_AsUTF8(pyErrMsg) << "\n" << PyUnicode_AsUTF8(traceback);
+      Py_XDECREF(traceback);
       msgStream << stackStream.str();
 
       JS::RootedValue rval(cx);
       JS::RootedString filename(cx, JS_NewStringCopyZ(cx, PyUnicode_AsUTF8(fileName)));
       JS::RootedString message(cx, JS_NewStringCopyZ(cx, msgStream.str().c_str()));
       // stack argument cannot be passed in as a string anymore (deprecated), and could not find a proper example using the new argument type
-      if (!JS::CreateError(cx, JSExnType::JSEXN_ERR, nullptr, filename, lineno, JS::ColumnNumberOneOrigin(1), nullptr, message, JS::NothingHandleValue, &rval)) {
-        return NULL;
-      }
-
+      bool created = JS::CreateError(cx, JSExnType::JSEXN_ERR, nullptr, filename, lineno, JS::ColumnNumberOneOrigin(1), nullptr, message, JS::NothingHandleValue, &rval);
       Py_DECREF(pyErrType);
       Py_DECREF(pyErrMsg);
+      if (!created) {
+        return NULL;
+      }
 
       return rval.toObjectOrNull();
     }

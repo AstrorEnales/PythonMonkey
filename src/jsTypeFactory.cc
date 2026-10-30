@@ -314,8 +314,7 @@ JS::Value jsTypeFactory(JSContext *cx, PyObject *object) {
     JS::RootedObject objectPrototype(cx);
     JS_GetClassPrototype(cx, JSProto_Object, &objectPrototype); // so that instanceof will work, not that prototype methods will
     JSObject *proxy = js::NewProxyObject(cx, &pyIterableProxyHandler, v, objectPrototype.get());
-    PyObject *iterable = PyObject_GetIter(object);
-    Py_INCREF(iterable);
+    PyObject *iterable = PyObject_GetIter(object); // new reference, released when the proxy is finalized
     JS::SetReservedSlot(proxy, PyObjectSlot, JS::PrivateValue(iterable));
     returnType.setObject(*proxy);
   }
@@ -441,12 +440,16 @@ bool callPyFunc(JSContext *cx, unsigned int argc, JS::Value *vp) {
   for (size_t i = 0; i < callargs.length() && i < argTupleLength; i++) {
     JS::RootedValue jsArg(cx, callargs[i]);
     PyObject *pyArgObj = pyTypeFactory(cx, jsArg);
-    if (!pyArgObj) return false; // error occurred
+    if (!pyArgObj) { // error occurred
+      setPyException(cx);
+      goto failure;
+    }
     PyTuple_SetItem(pyArgs, i, pyArgObj);
   }
 
   // set unspecified args to None, to match JS behaviour of setting unspecified args to undefined
   for (Py_ssize_t i = callargs.length(); i < argTupleLength; i++) {
+    Py_INCREF(Py_None); // PyTuple_SetItem steals it
     PyTuple_SetItem(pyArgs, i, Py_None);
   }
 

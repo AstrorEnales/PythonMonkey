@@ -135,8 +135,6 @@ static PyBytesProxyHandler pyBytesProxyHandler;
 
 
 JSObject *BufferType::toJsTypedArray(JSContext *cx, PyObject *pyObject) {
-  Py_INCREF(pyObject);
-
   // Get the pyObject's underlying buffer pointer and size
   Py_buffer *view = new Py_buffer{};
   bool immutable = false;
@@ -145,6 +143,7 @@ JSObject *BufferType::toJsTypedArray(JSContext *cx, PyObject *pyObject) {
     PyErr_Clear();     // a PyExc_BufferError was raised
 
     if (PyObject_GetBuffer(pyObject, view, PyBUF_ND /* C-contiguous */ | PyBUF_FORMAT) < 0) {
+      delete view;
       return nullptr;  // a PyExc_BufferError was raised again
     }
 
@@ -186,6 +185,7 @@ JSObject *BufferType::toJsTypedArray(JSContext *cx, PyObject *pyObject) {
     JS::RootedObject uint8ArrayPrototype(cx);
     JS_GetClassPrototype(cx, JSProto_Uint8Array, &uint8ArrayPrototype); // so that instanceof will work, not that prototype methods will
     JSObject *proxy = js::NewProxyObject(cx, &pyBytesProxyHandler, v, uint8ArrayPrototype.get());
+    Py_INCREF(pyObject); // released when the proxy is finalized (the mutable path above instead keeps the reference in the `Py_buffer`)
     JS::SetReservedSlot(proxy, PyObjectSlot, JS::PrivateValue(pyObject));
     JS::PersistentRootedObject *arrayBufferPointer = new JS::PersistentRootedObject(cx);
     arrayBufferPointer->set(arrayBuffer);

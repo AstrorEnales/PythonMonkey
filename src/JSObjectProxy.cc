@@ -208,6 +208,10 @@ PyObject *JSObjectProxyMethodDefinitions::JSObjectProxy_richcompare(JSObjectProx
   std::unordered_map<PyObject *, PyObject *> visited;
 
   bool isEqual = JSObjectProxy_richcompare_helper(self, other, visited);
+  for (auto &pair : visited) { // release the references the helper kept
+    Py_DECREF(pair.first);
+    Py_DECREF(pair.second);
+  }
   switch (op)
   {
   case Py_EQ:
@@ -232,7 +236,11 @@ bool JSObjectProxyMethodDefinitions::JSObjectProxy_richcompare_helper(JSObjectPr
     return true;
   }
 
-  visited.insert({{(PyObject *)self, other}});
+  // keep both alive until the comparison is done, so that no other object can take over their address in `visited`
+  if (visited.insert({(PyObject *)self, other}).second) {
+    Py_INCREF(self);
+    Py_INCREF(other);
+  }
 
   if (Py_TYPE((PyObject *)self) == Py_TYPE(other)) {
     JS::RootedValue selfVal(GLOBAL_CX, JS::ObjectValue(**(self->jsObject)));
@@ -263,21 +271,24 @@ bool JSObjectProxyMethodDefinitions::JSObjectProxy_richcompare_helper(JSObjectPr
     PyObject *pyVal2 = PyObject_GetItem((PyObject *)other, pyKey);
     Py_DECREF(pyKey);
     if (!pyVal2) { // if other.key is NULL then not equal
+      Py_XDECREF(pyVal1);
       return false;
     }
+    bool valuesEqual;
     if (pyVal1 && Py_TYPE(pyVal1) == &JSObjectProxyType) { // if either subvalue is a JSObjectProxy, we need to pass around our visited map
-      if (!JSObjectProxy_richcompare_helper((JSObjectProxy *)pyVal1, pyVal2, visited))
-      {
-        return false;
-      }
+      valuesEqual = JSObjectProxy_richcompare_helper((JSObjectProxy *)pyVal1, pyVal2, visited);
     }
-    else if (pyVal2 && Py_TYPE(pyVal2) == &JSObjectProxyType) {
-      if (!JSObjectProxy_richcompare_helper((JSObjectProxy *)pyVal2, pyVal1, visited))
-      {
-        return false;
-      }
+    else if (Py_TYPE(pyVal2) == &JSObjectProxyType) {
+      valuesEqual = JSObjectProxy_richcompare_helper((JSObjectProxy *)pyVal2, pyVal1, visited);
     }
-    else if (PyObject_RichCompare(pyVal1, pyVal2, Py_EQ) == Py_False) {
+    else {
+      PyObject *result = PyObject_RichCompare(pyVal1, pyVal2, Py_EQ);
+      valuesEqual = result != Py_False;
+      Py_XDECREF(result);
+    }
+    Py_XDECREF(pyVal1);
+    Py_DECREF(pyVal2);
+    if (!valuesEqual) {
       return false;
     }
   }
@@ -320,7 +331,9 @@ PyObject *JSObjectProxyMethodDefinitions::JSObjectProxy_iter_next(JSObjectProxy 
     return NULL;
   }
 
-  PyObject *retVal = JSFunctionProxyMethodDefinitions::JSFunctionProxy_call(nextFunction, PyTuple_New(0), NULL);
+  PyObject *noArgs = PyTuple_New(0);
+  PyObject *retVal = JSFunctionProxyMethodDefinitions::JSFunctionProxy_call(nextFunction, noArgs, NULL);
+  Py_DECREF(noArgs);
   Py_DECREF(nextFunction);
   if (retVal == NULL) {
     return NULL;
@@ -330,7 +343,10 @@ PyObject *JSObjectProxyMethodDefinitions::JSObjectProxy_iter_next(JSObjectProxy 
   key = PyUnicode_FromString("done");
   PyObject *done = JSObjectProxy_get((JSObjectProxy *)retVal, key);
   Py_DECREF(key);
-  if (done == Py_True) {
+  bool isDone = done == Py_True;
+  Py_XDECREF(done);
+  if (isDone) {
+    Py_DECREF(retVal);
     PyErr_SetNone(PyExc_StopIteration);
     return NULL;
   }
@@ -338,6 +354,7 @@ PyObject *JSObjectProxyMethodDefinitions::JSObjectProxy_iter_next(JSObjectProxy 
   key = PyUnicode_FromString("value");
   PyObject *value = JSObjectProxy_get((JSObjectProxy *)retVal, key);
   Py_DECREF(key);
+  Py_DECREF(retVal);
 
   return value;
 }
@@ -350,6 +367,7 @@ PyObject *JSObjectProxyMethodDefinitions::JSObjectProxy_repr(JSObjectProxy *self
   // Instead, we store this PyLongObject in a global dict, using itself as the hashable key, effectively interning the PyLongObject.
   PyObject *tsDict = PyThreadState_GetDict();
   PyObject *cyclicKey = PyDict_SetDefault(tsDict, /*key*/ objPtr, /*value*/ objPtr); // cyclicKey = (tsDict[objPtr] ??= objPtr)
+  Py_DECREF(objPtr); // tsDict keeps cyclicKey alive until it is deleted below
   int i = Py_ReprEnter(cyclicKey);
   if (i != 0) {
     return i > 0 ? PyUnicode_FromString("{...}") : NULL;
@@ -398,11 +416,9 @@ PyObject *JSObjectProxyMethodDefinitions::JSObjectProxy_repr(JSObjectProxy *self
 
     // escape infinite recur on superclass reference
     if (strcmp(PyUnicode_AsUTF8(key), "$super") == 0) {
+      Py_CLEAR(key);
       continue;
     }
-
-    // Prevent repr from deleting key or value during key format.
-    Py_INCREF(key);
 
     PyObject *s = PyObject_Repr(key);
     if (s == NULL) {
@@ -638,6 +654,7 @@ skip_optional:
 
   PyObject *value = JSObjectProxy_get(self, key);
   if (value == Py_None) {
+    Py_DECREF(value);
     Py_INCREF(default_value);
     value = default_value;
   }
@@ -669,6 +686,7 @@ skip_optional:
 
   PyObject *value = getKey(self, key, id, true);
   if (value == Py_None) {
+    Py_DECREF(value);
     assignKeyValue(self, key, id, default_value);
     Py_XINCREF(default_value);
     return default_value;
@@ -764,7 +782,7 @@ PyObject *JSObjectProxyMethodDefinitions::JSObjectProxy_update_method(JSObjectPr
   }
   else if (arg != NULL) {
     if (PyDict_CheckExact(arg) || PyObject_TypeCheck(arg, &JSObjectProxyType)) {
-      JSObjectProxyMethodDefinitions::JSObjectProxy_ior((JSObjectProxy *)self, arg);
+      Py_XDECREF(JSObjectProxyMethodDefinitions::JSObjectProxy_ior((JSObjectProxy *)self, arg)); // returns a new reference to self
       result = 0;
     } else { // iterable
       result = mergeFromSeq2((JSObjectProxy *)self, arg);
@@ -776,7 +794,7 @@ PyObject *JSObjectProxyMethodDefinitions::JSObjectProxy_update_method(JSObjectPr
 
   if (result == 0 && kwds != NULL) {
     if (PyArg_ValidateKeywordArguments(kwds)) {
-      JSObjectProxyMethodDefinitions::JSObjectProxy_ior((JSObjectProxy *)self, kwds);
+      Py_XDECREF(JSObjectProxyMethodDefinitions::JSObjectProxy_ior((JSObjectProxy *)self, kwds));
     }
   }
   Py_RETURN_NONE;

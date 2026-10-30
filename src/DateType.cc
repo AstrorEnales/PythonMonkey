@@ -41,8 +41,7 @@ PyObject *DateType::getPyObject(JSContext *cx, JS::HandleObject dateObj) {
     PyDateTime_TimeZone_UTC, // Make the resulting Python datetime object timezone-aware
                              // See https://docs.python.org/3/library/datetime.html#aware-and-naive-objects
     PyDateTimeAPI->DateTimeType
-  );
-  Py_INCREF(PyDateTime_TimeZone_UTC);
+  ); // takes its own reference to the tzinfo
 
   return pyObject;
 }

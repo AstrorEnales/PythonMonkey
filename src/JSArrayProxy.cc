@@ -111,7 +111,7 @@ PyObject *JSArrayProxyMethodDefinitions::JSArrayProxy_get_subscript(JSArrayProxy
     }
 
     if ((size_t)index >= (size_t)selfLength) {
-      PyErr_SetObject(PyExc_IndexError, PyUnicode_FromString("list index out of range"));
+      PyErr_SetString(PyExc_IndexError, "list index out of range");
       return NULL;
     }
 
@@ -224,7 +224,7 @@ static int list_ass_slice(JSArrayProxy *self, Py_ssize_t ilow, Py_ssize_t ihigh,
 
   if (selfLength + d == 0) {
     Py_XDECREF(v_as_SF);
-    JSArrayProxyMethodDefinitions::JSArrayProxy_clear_method(self);
+    Py_XDECREF(JSArrayProxyMethodDefinitions::JSArrayProxy_clear_method(self)); // returns None
     return 0;
   }
 
@@ -278,7 +278,7 @@ int JSArrayProxyMethodDefinitions::JSArrayProxy_assign_key(JSArrayProxy *self, P
     }
 
     if ((size_t)index >= (size_t)selfLength) {
-      PyErr_SetObject(PyExc_IndexError, PyUnicode_FromString("list assignment index out of range"));
+      PyErr_SetString(PyExc_IndexError, "list assignment index out of range");
       return -1;
     }
 
@@ -458,23 +458,15 @@ PyObject *JSArrayProxyMethodDefinitions::JSArrayProxy_richcompare(JSArrayProxy *
     PyObject *leftItem = pyTypeFactory(GLOBAL_CX, elementVal);
     PyObject *rightItem;
 
-    bool needToDecRefRightItem;
     if (PyObject_TypeCheck(other, &JSArrayProxyType)) {
       JS_GetElement(GLOBAL_CX, *(((JSArrayProxy *)other)->jsArray), index, &elementVal);
       rightItem = pyTypeFactory(GLOBAL_CX, elementVal);
-      needToDecRefRightItem = true;
     } else {
       rightItem = ((PyListObject *)other)->ob_item[index];
-      needToDecRefRightItem = false;
+      Py_INCREF(rightItem); // the comparison may mutate `other`
     }
 
-    if (leftItem == rightItem) {
-      continue;
-    }
-
-    Py_INCREF(leftItem);
-    Py_INCREF(rightItem);
-    int k = PyObject_RichCompareBool(leftItem, rightItem, Py_EQ);
+    int k = PyObject_RichCompareBool(leftItem, rightItem, Py_EQ); // 1 for the identical object
     Py_DECREF(leftItem);
     Py_DECREF(rightItem);
     if (k < 0) {
@@ -482,11 +474,6 @@ PyObject *JSArrayProxyMethodDefinitions::JSArrayProxy_richcompare(JSArrayProxy *
     }
     if (!k) {
       break;
-    }
-
-    Py_DECREF(leftItem);
-    if (needToDecRefRightItem) {
-      Py_DECREF(rightItem);
     }
   }
 
@@ -506,8 +493,17 @@ PyObject *JSArrayProxyMethodDefinitions::JSArrayProxy_richcompare(JSArrayProxy *
   JS_GetElement(GLOBAL_CX, *(self->jsArray), index, &elementVal);
   /* Compare the final item again using the proper operator */
   PyObject *pyElementVal = pyTypeFactory(GLOBAL_CX, elementVal);
-  PyObject *result = PyObject_RichCompare(pyElementVal, ((PyListObject *)other)->ob_item[index], op);
+  PyObject *otherElementVal;
+  if (PyObject_TypeCheck(other, &JSArrayProxyType)) { // its PyListObject part has no items
+    JS_GetElement(GLOBAL_CX, *(((JSArrayProxy *)other)->jsArray), index, &elementVal);
+    otherElementVal = pyTypeFactory(GLOBAL_CX, elementVal);
+  } else {
+    otherElementVal = ((PyListObject *)other)->ob_item[index];
+    Py_INCREF(otherElementVal);
+  }
+  PyObject *result = PyObject_RichCompare(pyElementVal, otherElementVal, op);
   Py_DECREF(pyElementVal);
+  Py_DECREF(otherElementVal);
   return result;
 }
 
@@ -706,20 +702,12 @@ int JSArrayProxyMethodDefinitions::JSArrayProxy_contains(JSArrayProxy *self, PyO
 }
 
 PyObject *JSArrayProxyMethodDefinitions::JSArrayProxy_inplace_concat(JSArrayProxy *self, PyObject *value) {
-  Py_ssize_t selfLength = JSArrayProxy_length(self);
-  Py_ssize_t valueLength = Py_SIZE(value);
-
-  // allocate extra spacePy_SIZE
-  JS::SetArrayLength(GLOBAL_CX, *(self->jsArray), selfLength + valueLength);
-
-  JS::RootedValue jValue(GLOBAL_CX, jsTypeFactory(GLOBAL_CX, value));
-  JS::RootedObject jRootedValue = JS::RootedObject(GLOBAL_CX, jValue.toObjectOrNull());
-
-  JS::RootedValue elementVal(GLOBAL_CX);
-  for (Py_ssize_t inputIdx = 0; inputIdx < valueLength; inputIdx++) {
-    JS_GetElement(GLOBAL_CX, jRootedValue, inputIdx, &elementVal);
-    JS_SetElement(GLOBAL_CX, *(self->jsArray), selfLength + inputIdx, elementVal);
+  // like list: `self += iterable` is `self.extend(iterable)`
+  PyObject *result = JSArrayProxy_extend(self, value);
+  if (result == NULL) {
+    return NULL;
   }
+  Py_DECREF(result);
 
   Py_INCREF(self);
   return (PyObject *)self;
@@ -733,7 +721,7 @@ PyObject *JSArrayProxyMethodDefinitions::JSArrayProxy_inplace_repeat(JSArrayProx
   }
 
   if (n < 1) {
-    JSArrayProxy_clear_method(self);
+    Py_XDECREF(JSArrayProxy_clear_method(self)); // returns None
     Py_INCREF(self);
     return (PyObject *)self;
   }
@@ -888,6 +876,7 @@ PyObject *JSArrayProxyMethodDefinitions::JSArrayProxy_extend(JSArrayProxy *self,
 
       JS::SetArrayLength(GLOBAL_CX, *(self->jsArray), len + 1);
       JS::RootedValue jValue(GLOBAL_CX, jsTypeFactory(GLOBAL_CX, item));
+      Py_DECREF(item);
       JS_SetElement(GLOBAL_CX, *(self->jsArray), len, jValue);
       len++;
     }
@@ -1108,6 +1097,7 @@ static bool sort_compare_key_func(JSContext *cx, unsigned argc, JS::Value *vp) {
   PyObject *args_1_result = PyObject_CallFunction(keyfunc, "O", args_1);
   Py_DECREF(args_1);
   if (!args_1_result) {
+    Py_DECREF(args_0_result);
     return false;
   }
 
@@ -1122,15 +1112,11 @@ static bool sort_compare_key_func(JSContext *cx, unsigned argc, JS::Value *vp) {
     else if (cmp == 0) {
       args.rval().setInt32(reverse ? -1 : 1);
     }
-    else {
-      return false;
-    }
   }
-  else {
-    return false;
-  }
+  Py_DECREF(args_0_result);
+  Py_DECREF(args_1_result);
 
-  return true;
+  return cmp >= 0;
 }
 
 // private
@@ -1242,7 +1228,7 @@ PyObject *JSArrayProxyMethodDefinitions::JSArrayProxy_sort(JSArrayProxy *self, P
           }
 
           if (reverse) {
-            JSArrayProxy_reverse(self);
+            Py_XDECREF(JSArrayProxy_reverse(self)); // returns None
           }
         }
       }
@@ -1255,7 +1241,7 @@ PyObject *JSArrayProxyMethodDefinitions::JSArrayProxy_sort(JSArrayProxy *self, P
         }
 
         if (reverse) {
-          JSArrayProxy_reverse(self);
+          Py_XDECREF(JSArrayProxy_reverse(self)); // returns None
         }
       }
       else if (PyCFunction_Check(keyfunc)) {

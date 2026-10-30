@@ -326,46 +326,64 @@ static PyObject *collect(PyObject *self, PyObject *args) {
   Py_RETURN_NONE;
 }
 
-static bool getEvalOption(PyObject *evalOptions, const char *optionName, const char **s_p) {
+/**
+ * @return a new reference to the option's value, or NULL if it is not set
+ */
+static PyObject *getEvalOptionValue(PyObject *evalOptions, const char *optionName) {
   PyObject *value;
   if (PyObject_TypeCheck(evalOptions, &JSObjectProxyType)) {
-    value = PyMapping_GetItemString(evalOptions, optionName);
+    value = PyMapping_GetItemString(evalOptions, optionName); // new reference
   } else {
-    value = PyDict_GetItemString(evalOptions, optionName);
+    value = PyDict_GetItemString(evalOptions, optionName); // borrowed reference
+    Py_XINCREF(value);
   }
-  if (value && value != Py_None) {
-    *s_p = PyUnicode_AsUTF8(PyUnicode_FromObject(value));
+  if (value == Py_None) {
+    Py_CLEAR(value);
   }
-  return value != NULL && value != Py_None;
+  return value;
+}
+
+/**
+ * @param owner_p - receives the str object owning the UTF-8 buffer *s_p points to, which the caller must release once done with *s_p
+ */
+static bool getEvalOption(PyObject *evalOptions, const char *optionName, const char **s_p, PyObject **owner_p) {
+  PyObject *value = getEvalOptionValue(evalOptions, optionName);
+  if (!value) {
+    return false;
+  }
+  PyObject *str = PyUnicode_FromObject(value); // needs a strict Python str object (not a subtype)
+  Py_DECREF(value);
+  if (!str) {
+    return false;
+  }
+  *s_p = PyUnicode_AsUTF8(str);
+  Py_XDECREF(*owner_p);
+  *owner_p = str;
+  return true;
 }
 
 static bool getEvalOption(PyObject *evalOptions, const char *optionName, unsigned long *l_p) {
-  PyObject *value;
-  if (PyObject_TypeCheck(evalOptions, &JSObjectProxyType)) {
-    value = PyMapping_GetItemString(evalOptions, optionName);
-    if (value && value != Py_None) {
-      *l_p = (unsigned long)PyFloat_AsDouble(value);
-    }
-  } else {
-    value = PyDict_GetItemString(evalOptions, optionName);
-    if (value && value != Py_None) {
-      *l_p = PyLong_AsUnsignedLong(value);
-    }
+  PyObject *value = getEvalOptionValue(evalOptions, optionName);
+  if (!value) {
+    return false;
   }
-  return value != NULL && value != Py_None;
+  if (PyObject_TypeCheck(evalOptions, &JSObjectProxyType)) {
+    *l_p = (unsigned long)PyFloat_AsDouble(value);
+  } else {
+    *l_p = PyLong_AsUnsignedLong(value);
+  }
+  Py_DECREF(value);
+  return true;
 }
 
 static bool getEvalOption(PyObject *evalOptions, const char *optionName, bool *b_p) {
-  PyObject *value;
-  if (PyObject_TypeCheck(evalOptions, &JSObjectProxyType)) {
-    value = PyMapping_GetItemString(evalOptions, optionName);
-  } else {
-    value = PyDict_GetItemString(evalOptions, optionName);
+  PyObject *value = getEvalOptionValue(evalOptions, optionName);
+  if (!value) {
+    return false;
   }
-  if (value && value != Py_None) {
-    *b_p = PyObject_IsTrue(value) == 1 ? true : false;
-  }
-  return value != NULL && value != Py_None;
+  *b_p = PyObject_IsTrue(value) == 1 ? true : false;
+  Py_DECREF(value);
+  return true;
 }
 
 /**
@@ -396,8 +414,11 @@ static PyObject *eval(PyObject *self, PyObject *args) {
      */
     int fd = PyObject_AsFileDescriptor(arg0);
     int fd2 = fd == -1 ? -1 : dup(fd);
-    file = fd2 == -1 ? NULL : fdopen(fd, "rb");
+    file = fd2 == -1 ? NULL : fdopen(fd2, "rb");
     if (!file) {
+      if (fd2 != -1) {
+        close(fd2);
+      }
       PyErr_SetString(PyExc_TypeError, "error opening file stream");
       return NULL;
     }
@@ -422,13 +443,16 @@ static PyObject *eval(PyObject *self, PyObject *args) {
   .setNoScriptRval(false)
   .setIntroductionType("pythonmonkey eval");
 
+  PyObject *filenameOwner = NULL; // owns the filename's UTF-8 buffer until the code is compiled
   if (evalOptions) {
     const char *s;
     unsigned long l;
     bool b;
 
-    if (getEvalOption(evalOptions, "filename", &s)) options.setFile(s);
-    if (getEvalOption(evalOptions, "lineno", &l)) options.setLine(l);
+    bool hasFilename = getEvalOption(evalOptions, "filename", &s, &filenameOwner);
+    if (hasFilename) options.setFile(s);
+    bool hasLineno = getEvalOption(evalOptions, "lineno", &l);
+    if (hasLineno) options.setLine(l);
     if (getEvalOption(evalOptions, "column", &l)) options.setColumn(JS::ColumnNumberOneOrigin(l));
     if (getEvalOption(evalOptions, "mutedErrors", &b)) options.setMutedErrors(b);
     if (getEvalOption(evalOptions, "noScriptRval", &b)) options.setNoScriptRval(b);
@@ -439,21 +463,23 @@ static PyObject *eval(PyObject *self, PyObject *args) {
     if (getEvalOption(evalOptions, "fromPythonFrame", &b) && b) {
 #if PY_VERSION_HEX >= 0x03090000
       PyFrameObject *frame = PyEval_GetFrame();
-      if (frame && !getEvalOption(evalOptions, "lineno", &l)) {
+      if (frame && !hasLineno) {
         options.setLine(PyFrame_GetLineNumber(frame));
       } /* lineno */
 #endif
 #if 0 && (PY_VERSION_HEX >= 0x030a0000) && (PY_VERSION_HEX < 0x030c0000)
       PyObject *filename = PyDict_GetItemString(frame->f_builtins, "__file__");
 #elif (PY_VERSION_HEX >= 0x030c0000)
-      PyObject *filename = PyDict_GetItemString(PyFrame_GetGlobals(frame), "__file__");
+      PyObject *frameGlobals = frame ? PyFrame_GetGlobals(frame) : NULL; // new reference
+      PyObject *filename = frameGlobals ? PyDict_GetItemString(frameGlobals, "__file__") : NULL; // borrowed, the frame keeps its globals alive
+      Py_XDECREF(frameGlobals);
 #else
       PyObject *filename = NULL;
 #endif
-      if (!getEvalOption(evalOptions, "filename", &s)) {
+      if (!hasFilename) {
         if (filename && PyUnicode_Check(filename)) {
-          PyObject *filenameStr = PyUnicode_FromObject(filename); // needs a strict Python str object (not a subtype)
-          options.setFile(PyUnicode_AsUTF8(filenameStr));
+          filenameOwner = PyUnicode_FromObject(filename); // needs a strict Python str object (not a subtype)
+          options.setFile(PyUnicode_AsUTF8(filenameOwner));
         }
       } /* filename */
     } /* fromPythonFrame */
@@ -467,6 +493,7 @@ static PyObject *eval(PyObject *self, PyObject *args) {
     Py_ssize_t codeLength;
     const char *codeChars = PyUnicode_AsUTF8AndSize(code, &codeLength);
     if (!source.init(GLOBAL_CX, codeChars, codeLength, JS::SourceOwnership::Borrowed)) {
+      Py_XDECREF(filenameOwner);
       setSpiderMonkeyException(GLOBAL_CX);
       return NULL;
     }
@@ -476,6 +503,7 @@ static PyObject *eval(PyObject *self, PyObject *args) {
     script = JS::CompileUtf8File(GLOBAL_CX, options, file);
     fclose(file);
   }
+  Py_XDECREF(filenameOwner); // the compiled script keeps its own copy of the filename
 
   if (!script) {
     setSpiderMonkeyException(GLOBAL_CX);
@@ -491,6 +519,7 @@ static PyObject *eval(PyObject *self, PyObject *args) {
   // translate to the proper python type
   PyObject *returnValue = pyTypeFactory(GLOBAL_CX, rval);
   if (PyErr_Occurred()) {
+    Py_XDECREF(returnValue);
     return NULL;
   }
 

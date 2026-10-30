@@ -105,19 +105,24 @@ bool PyObjectProxyHandler::ownPropertyKeys(JSContext *cx, JS::HandleObject proxy
     PyObject *nonDunderKeys = PyList_New(0);
     for (size_t i = 0; i < keysLength; i++) {
       PyObject *key = PyList_GetItem(keys, i);
-      if (PyObject_CallMethod(key, "startswith", "(s)", "__") == Py_False) { // if key starts with "__", ignore it
+      PyObject *isDunder = PyObject_CallMethod(key, "startswith", "(s)", "__");
+      if (isDunder == Py_False) { // if key starts with "__", ignore it
         PyList_Append(nonDunderKeys, key);
       }
+      Py_XDECREF(isDunder);
     }
+    Py_DECREF(keys);
 
-    return handleOwnPropertyKeys(cx, nonDunderKeys, PyList_Size(nonDunderKeys), props);
+    bool success = handleOwnPropertyKeys(cx, nonDunderKeys, PyList_Size(nonDunderKeys), props);
+    Py_DECREF(nonDunderKeys);
+    return success;
   }
   else {
     if (PyErr_Occurred()) {
       PyErr_Clear();
     }
 
-    return handleOwnPropertyKeys(cx, PyList_New(0), 0, props);
+    return true; // no keys
   }
 }
 
@@ -125,7 +130,9 @@ bool PyObjectProxyHandler::delete_(JSContext *cx, JS::HandleObject proxy, JS::Ha
   JS::ObjectOpResult &result) const {
   PyObject *attrName = idToKey(cx, id);
   PyObject *self = JS::GetMaybePtrFromReservedSlot<PyObject>(proxy, PyObjectSlot);
-  if (PyObject_SetAttr(self, attrName, NULL) < 0) {
+  int status = PyObject_SetAttr(self, attrName, NULL);
+  Py_DECREF(attrName);
+  if (status < 0) {
     return result.failCantDelete(); // raises JS exception
   }
   return result.succeed();
@@ -143,11 +150,14 @@ bool PyObjectProxyHandler::getOwnPropertyDescriptor(
   PyObject *attrName = idToKey(cx, id);
   PyObject *self = JS::GetMaybePtrFromReservedSlot<PyObject>(proxy, PyObjectSlot);
   PyObject *item = PyObject_GetAttr(self, attrName);
+  Py_DECREF(attrName);
   if (!item && PyErr_ExceptionMatches(PyExc_AttributeError)) {
     PyErr_Clear(); // clear error, we will be returning undefined in this case
   }
 
-  return handleGetOwnPropertyDescriptor(cx, id, desc, item);
+  bool success = handleGetOwnPropertyDescriptor(cx, id, desc, item);
+  Py_XDECREF(item); // the JS value holds its own reference where it needs one
+  return success;
 }
 
 bool PyObjectProxyHandler::set(JSContext *cx, JS::HandleObject proxy, JS::HandleId id,
@@ -158,11 +168,12 @@ bool PyObjectProxyHandler::set(JSContext *cx, JS::HandleObject proxy, JS::Handle
 
   PyObject *self = JS::GetMaybePtrFromReservedSlot<PyObject>(proxy, PyObjectSlot);
   PyObject *value = pyTypeFactory(cx, rootedV);
-  if (PyObject_SetAttr(self, attrName, value)) {
-    Py_DECREF(value);
+  int status = PyObject_SetAttr(self, attrName, value);
+  Py_DECREF(attrName);
+  Py_DECREF(value);
+  if (status < 0) {
     return result.failCantSetInterposed(); // raises JS exception
   }
-  Py_DECREF(value);
   return result.succeed();
 }
 
@@ -176,6 +187,7 @@ bool PyObjectProxyHandler::hasOwn(JSContext *cx, JS::HandleObject proxy, JS::Han
   PyObject *attrName = idToKey(cx, id);
   PyObject *self = JS::GetMaybePtrFromReservedSlot<PyObject>(proxy, PyObjectSlot);
   *bp = PyObject_HasAttr(self, attrName) == 1;
+  Py_DECREF(attrName);
   return true;
 }
 
