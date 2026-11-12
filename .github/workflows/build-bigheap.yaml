@@ -174,7 +174,7 @@ jobs:
       matrix:
         # the platforms of the build-mozjs-* jobs (macos-15 is arm64, macos-15-intel x86_64)
         os: [ 'ubuntu-22.04', 'ubuntu-22.04-arm', 'macos-15-intel', 'macos-15', 'windows-2022' ]
-        python_version: [ '3.11', '3.12', '3.13', '3.14' ]
+        python_version: [ '3.11', '3.12', '3.13', '3.14', '3.15' ]
     runs-on: ${{ matrix.os }}
     # Ubuntu 20.04 (glibc 2.31) gives manylinux_2_31 wheels, like upstream's
     container: ${{ (startsWith(matrix.os, 'ubuntu') && 'ubuntu:20.04') || null }}
@@ -237,20 +237,37 @@ jobs:
         # pminit's package-lock.json (lockfileVersion 3) needs npm 7 or later; Ubuntu 20.04 ships npm 6
         with:
           node-version: 20
+      # Poetry 1.5 fails on Python 3.15 (WheelDistribution lacks locate_file), so 1.8.5 like upstream.
+      # Like upstream, snok/install-poetry v1.4.2 except on Windows: install.python-poetry.org returns
+      # 403 to v1.4.1's Python-urllib download on Linux and macOS, while v1.4.2 cannot create its venv
+      # on Windows under bash (snok/install-poetry#94), where v1.4.1's legacy installer still works.
       - name: Setup Poetry
         id: poetry
-        uses: snok/install-poetry@v1.4.1
+        if: ${{ runner.os != 'Windows' }}
+        uses: snok/install-poetry@v1.4.2
         continue-on-error: true # its installer does not retry network errors (seen in the arm64 container)
         with:
-          version: 1.5.1
+          version: 1.8.5
+      - name: Setup Poetry (Windows)
+        id: poetry-windows
+        if: ${{ runner.os == 'Windows' }}
+        uses: snok/install-poetry@v1.4.1
+        continue-on-error: true
+        with:
+          version: 1.8.5
       - name: Wait before retrying the Poetry setup
-        if: ${{ steps.poetry.outcome == 'failure' }}
+        if: ${{ steps.poetry.outcome == 'failure' || steps.poetry-windows.outcome == 'failure' }}
         run: sleep 30
       - name: Setup Poetry (retry)
         if: ${{ steps.poetry.outcome == 'failure' }}
+        uses: snok/install-poetry@v1.4.2
+        with:
+          version: 1.8.5
+      - name: Setup Poetry (Windows, retry)
+        if: ${{ steps.poetry-windows.outcome == 'failure' }}
         uses: snok/install-poetry@v1.4.1
         with:
-          version: 1.5.1
+          version: 1.8.5
       - name: Install Dependencies
         run: |
           if [[ "$OSTYPE" == "linux-gnu"* ]]; then # Linux
