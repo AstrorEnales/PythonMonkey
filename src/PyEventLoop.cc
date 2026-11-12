@@ -13,6 +13,7 @@
 
 #include <Python.h>
 #include <stdint.h>
+#include <stddef.h>
 
 /**
  * @brief Wrapper to decrement the counter of queueing event-loop jobs after the job finishes
@@ -210,6 +211,8 @@ PyEventLoop PyEventLoop::_getLoopOnThread(PyThreadState *tstate) {
     // CPython 3.13.13 and 3.14.4 appended `datastack_cached_chunk` to PyThreadState, which moves
     // `asyncio_running_loop` by one pointer. Place it by the running interpreter's version
     // (Py_Version), so a wheel built on one side of those releases works on the other.
+    // see https://github.com/python/cpython/commit/19cbcc0f85 (gh-142183)
+    //     https://github.com/Distributive-Network/PythonMonkey/issues/515 (upstream's fix covers 3.14 only)
     #if PY_VERSION_HEX >= 0x030e0000
     const unsigned long datastackChunkAdded = 0x030e0400;
     #else

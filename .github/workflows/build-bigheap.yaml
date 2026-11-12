@@ -10,7 +10,7 @@ name: 'Build bigheap wheels'
 #  - build-wheels: Release builds of the bridge with node_modules bundled
 #    (PM_BUNDLE_NODE_MODULES=1), tested with upstream's suites and
 #    .github/scripts/check_self_contained.py.
-#  - release: pushing a tag bigheap-v<upstream version>-<n> (e.g. bigheap-v1.3.2-2)
+#  - release: pushing a tag bigheap-v<upstream version>-<n> (e.g. bigheap-v1.5.1-1)
 #    publishes the wheels, version <upstream version>+bigheap.<n>, as a GitHub release.
 #
 # Pushes to a bigheap-<upstream version> branch build <version>+bigheap.dev<run> wheels
@@ -48,8 +48,8 @@ jobs:
       fail-fast: false
       matrix:
         # Linux builds run in an Ubuntu 20.04 container (glibc 2.31, matching the manylinux_2_31 wheels);
-        # macos-15 is arm64, macos-15-intel is x86_64. Upstream builds arm64 on macos-14, but only the macos-15
-        # images ship llvm@18 (with lld); the minimum macOS version is set by configure, not the runner.
+        # macos-15 is arm64, macos-15-intel is x86_64, like upstream. The minimum macOS version is set by
+        # configure, not the runner.
         os: [ 'ubuntu-22.04', 'ubuntu-22.04-arm', 'macos-15-intel', 'macos-15' ]
     runs-on: ${{ matrix.os }}
     container: ${{ (startsWith(matrix.os, 'ubuntu') && 'ubuntu:20.04') || null }}
@@ -63,7 +63,7 @@ jobs:
         with:
           path: |
             ./_spidermonkey_install/*
-          key: mozjs-bigheap-${{ env.MOZCENTRAL_VERSION }}-${{ hashFiles('setup.sh', 'patches/**') }}-${{ runner.os }}-${{ runner.arch }}
+          key: mozjs-bigheap-${{ env.MOZCENTRAL_VERSION }}-${{ hashFiles('setup.sh', 'cmake/macos-brew-deps.sh', 'patches/**') }}-${{ runner.os }}-${{ runner.arch }}
       - name: Setup container
         if: ${{ startsWith(matrix.os, 'ubuntu') && steps.cache-spidermonkey.outputs.cache-hit != 'true' }}
         run: |
@@ -80,10 +80,10 @@ jobs:
           apt-get install -y lsb-release wget software-properties-common gnupg
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
-          ./llvm.sh 18 # install LLVM version 18
-          update-alternatives --install /usr/bin/llvm-config llvm-config /usr/bin/llvm-config-18 18
-          update-alternatives --install /usr/bin/clang clang /usr/bin/clang-18 18
-          update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-18 18
+          ./llvm.sh 19 # SpiderMonkey at the current mozcentral.version pin requires clang/llvm >= 19
+          update-alternatives --install /usr/bin/llvm-config llvm-config /usr/bin/llvm-config-19 19
+          update-alternatives --install /usr/bin/clang clang /usr/bin/clang-19 19
+          update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-19 19
           clang --version
           clang++ --version
       - name: Setup Python
@@ -108,16 +108,8 @@ jobs:
         if: ${{ startsWith(matrix.os, 'macos') && steps.cache-spidermonkey.outputs.cache-hit != 'true' }}
         # Xcode 16.x removed the old linker behaviour (-ld64 or -ld_classic) that SpiderMonkey relies on, so we need to switch to an older version
         run: sudo xcode-select -switch /Applications/Xcode_16.0.app
-      - name: Provide lld as the host linker
-        if: ${{ startsWith(matrix.os, 'macos') && steps.cache-spidermonkey.outputs.cache-hit != 'true' }}
-        # Homebrew has no lld bottles for these runners any more, but the images' preinstalled llvm@18 includes it.
-        # Expose only ld64.lld, so the compiler stays Apple clang.
-        run: |
-          mkdir -p "$RUNNER_TEMP/lld-bin"
-          ln -sf "$(brew --prefix llvm@18)/bin/lld" "$RUNNER_TEMP/lld-bin/ld64.lld"
-          "$RUNNER_TEMP/lld-bin/ld64.lld" --version
-          echo "$RUNNER_TEMP/lld-bin" >> $GITHUB_PATH
       - name: Build spidermonkey
+        # on macOS, setup.sh puts llvm@19 and lld@19 on PATH (cmake/macos-brew-deps.sh): Xcode's clang is too old
         if: ${{ steps.cache-spidermonkey.outputs.cache-hit != 'true' }}
         run: ./setup.sh
       - name: Upload the mozjs library
@@ -141,7 +133,7 @@ jobs:
         with:
           path: |
             ./_spidermonkey_install/*
-          key: mozjs-bigheap-${{ env.MOZCENTRAL_VERSION }}-${{ hashFiles('setup.sh', 'patches/**') }}-${{ runner.os }}-${{ runner.arch }}
+          key: mozjs-bigheap-${{ env.MOZCENTRAL_VERSION }}-${{ hashFiles('setup.sh', 'cmake/macos-brew-deps.sh', 'patches/**') }}-${{ runner.os }}-${{ runner.arch }}
       - name: Install dependencies
         if: ${{ steps.cache-spidermonkey.outputs.cache-hit != 'true' }}
         shell: powershell
@@ -273,9 +265,24 @@ jobs:
           if [[ "$OSTYPE" == "linux-gnu"* ]]; then # Linux
             sudo apt-get update -y
             sudo apt-get install -y cmake llvm
+            # Like upstream: SpiderMonkey's headers now require clang/llvm >= 19 and libstdc++ >= 10
+            # to compile against, which the container's stock gcc-9 toolchain doesn't meet.
+            sudo apt-get install -y lsb-release wget software-properties-common gnupg
+            wget https://apt.llvm.org/llvm.sh
+            chmod +x llvm.sh
+            sudo ./llvm.sh 19
+            sudo update-alternatives --install /usr/bin/llvm-config llvm-config /usr/bin/llvm-config-19 19
+            sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-19 19
+            sudo update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-19 19
+            sudo apt-get install -y libstdc++-10-dev
+            echo "CC=clang" >> $GITHUB_ENV
+            echo "CXX=clang++" >> $GITHUB_ENV
           elif [[ "$OSTYPE" == "darwin"* ]]; then # macOS
-            command -v cmake >/dev/null || brew install cmake # the runner images ship cmake
-            command -v timeout >/dev/null || brew install coreutils # peter-jr runs each JS test under timeout
+            # Shared with setup.sh: llvm@19/lld@19 (Xcode's clang is too old for SpiderMonkey's headers),
+            # on Intel from archived bottles. peter-jr has its own `timeout`, so no coreutils.
+            source ./cmake/macos-brew-deps.sh
+            install_macos_brew_deps
+            echo "PATH=$PATH" >> $GITHUB_ENV
           fi
           poetry self add "poetry-dynamic-versioning[plugin]"
           poetry env use python$PYTHON_VERSION || poetry env use python3 # use the correct Python version we've set up
@@ -289,7 +296,7 @@ jobs:
         with:
           path: |
             ./_spidermonkey_install/*
-          key: mozjs-bigheap-${{ env.MOZCENTRAL_VERSION }}-${{ hashFiles('setup.sh', 'patches/**') }}-${{ runner.os }}-${{ runner.arch }}
+          key: mozjs-bigheap-${{ env.MOZCENTRAL_VERSION }}-${{ hashFiles('setup.sh', 'cmake/macos-brew-deps.sh', 'patches/**') }}-${{ runner.os }}-${{ runner.arch }}
           fail-on-cache-miss: true # built by the build-mozjs-* jobs
       - name: Build wheel
         id: build
