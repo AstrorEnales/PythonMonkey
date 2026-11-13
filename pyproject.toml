@@ -78,7 +78,7 @@ numpy = [
   {version = "^2.0.1",  python = ">=3.9,<3.10"}, # NumPy 2.1.0  drops support for Python 3.9
   {version = "^1.24.3", python = ">=3.8,<3.9"},  # NumPy 1.25.0 drops support for Python 3.8
 ]
-pminit = { path = "./python/pminit", develop = true }
+# no pminit here either (upstream installs ./python/pminit for development): CI builds with PM_BUNDLE_NODE_MODULES=1
 
 
 [build-system]
